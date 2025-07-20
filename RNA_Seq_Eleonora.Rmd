@@ -1,0 +1,5031 @@
+
+---
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: united
+    code_folding: hide
+    pdf_document:
+      toc: true
+  output: null
+  word_document: default
+  pdf_document:
+    toc: true
+author: "Eleonora Curzi"
+date: "`r Sys.Date()`"
+title: "<center><font color='darkblue'>**RNAseq Analysis**</center></font>"
+---
+# Overview
+
+This document contains the RNA-seq analysis for the U251 KD cells project. The main focus of this analysis is to examine the gene expression changes in U251 cells with knockdown of glycolysis-related genes, including PFKFB3, PFK-1M, and PFK-1L. The objective is to uncover insights into the metabolic changes that occur during the knockdown and to identify key pathways involved in glycolysis and cancer metabolism.
+
+# Project Information
+
+```{r}
+# Sample data for the table
+info_data <- data.frame(
+  Details = c("Eleonora Curzi", "March 2025", "Glioblastoma", "U_251", "Scr, PFKFB3, PFK-1M, PFK-1L")
+)
+rownames(info_data) <- c("Name", "Date", "Project", "Cell Line", "Knockdown Genes")
+
+# Use knitr::kable() to create a simple table
+knitr::kable(info_data)
+```
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "C:/Users/CHAMAAF/OneDrive/Documents/KAUST/GitHub/RNA-SEq_Eleonora/New Analysis logfold more")
+
+library(BiocManager)
+library(tidyverse)
+library(DESeq2)
+library(pheatmap)
+library(dplyr)
+library(RColorBrewer)
+library(ggplot2)
+library(ggrepel)
+library(tximeta)
+library(AnnotationHub)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(limma)
+library(vsn)
+library(ggforce)
+library(clusterProfiler)
+library(biomaRt)
+library(ggprism)
+library(KEGGREST)
+library(VennDiagram)
+library(pathview)
+library(DT)
+library(htmltools)
+library(stringr)
+library(reactome.db)
+library(ReactomePA)
+library(msigdbr)
+library(fgsea)
+
+
+```
+
+## Sample Data
+
+This section contains the metadata preparation for the RNA-seq samples. The metadata includes information such as sample IDs, conditions, and treatments.
+
+```{r meta_data, echo=FALSE, message=FALSE, warning=FALSE, include=TRUE, results='asis', fig.width=7, fig.height=5}
+setwd("C:/Users/CHAMAAF/OneDrive/Documents/KAUST/GitHub/RNA-SEq_Eleonora/New Analysis logfold more")
+getwd()
+meta_df <- read.csv("meta_rnaseq_samples.csv") |> 
+  dplyr::select(number, sample_id, sample_names, conditions, cells, treatments, replicates)
+
+data_directory <- "C:/Users/CHAMAAF/OneDrive/Documents/KAUST/GitHub/RNA-SEq_Eleonora/glycolysis_gene_kd/counting/salmon"
+files_dir <- dir(data_directory, pattern = "quant.sf", recursive =T)
+full_path <- file.path(data_directory, files_dir)
+
+## the file names of the Quant files should be exactly the same as the meta data
+#Here I cleaned the "Quant files" file_names to make it identical to the "meta data" file_names, then I left joined both.
+
+file_names <- dirname(full_path) %>% basename() %>% sub(pattern = "_quant", replacement = "", .)
+
+coldata <- tibble(files = full_path, sample_id = file_names)
+
+coldata <- coldata |>
+    inner_join(meta_df) |>
+    dplyr::arrange(number) |>
+  dplyr::rename(names = sample_id) %>% 
+  dplyr::mutate(code_names = names) %>% 
+  dplyr::mutate(names = sample_names)
+  
+
+#colnames(coldata)
+
+# Modify the names column to add "_quant"
+#coldata$names <- paste0(coldata$names, "_quant")
+
+U251_coldata <- dplyr::filter(coldata, cells == "U251")
+#U251_coldata <- dplyr::filter(U251_coldata, treatments == "scr")
+
+#rownames(U251_coldata)
+
+# Print Final Metadata Summary
+DT::datatable(U251_coldata, 
+              options = list(
+                scrollX = TRUE, 
+                pageLength = 10,
+                columnDefs = list(list(targets = which(names(U251_coldata) == "files"), visible = FALSE))),
+              caption = "Filtered Metadata: U251 cell line")
+
+```
+
+# Differential Expression Analysis
+
+This section prepares the RNA-seq data for differential expression analysis using the DESeq2 package. The dataset includes the processed gene counts for the U251 cells, and filtering steps are applied to remove lowly expressed genes.
+
+```{r data_processing, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='asis', fig.width=6, fig.height=5}
+
+se <- tximeta(coldata= U251_coldata)
+
+gse <- summarizeToGene(se)
+
+
+#SummarizedExperiment()
+#dim(gse)
+
+#colData(gse)
+
+gse$conditions <- factor(gse$conditions)
+
+dds <- DESeqDataSet(gse, design = ~ conditions)
+
+#assayNames(dds)
+#rowRanges(dds)
+
+keep <- rowSums(counts(dds)) > 3 * U251_coldata %>% 
+  group_by(conditions) %>% 
+  summarise(count = n()) %>% 
+  dplyr::select(count) %>% 
+  unlist() %>% min()
+
+
+#table(keep)
+
+dds <- dds[keep]
+
+dim(dds)
+
+dds <- DESeq(dds)
+
+#saveRDS(dds, file = "./results/dds_U251.rds")
+
+#dds <- readRDS("C:/Users/CHAMAAF/OneDrive/Documents/KAUST/GitHub/RNA-SEq_Eleonora/glycolysis_gene_kd/results/dds_U251.rds")
+
+# Display data set summary
+summary_text <- paste("Final dataset contains", dim(dds)[1], "genes across", dim(dds)[2], "samples.")
+
+
+#cat(summary_text) # check this to increase the text size: 
+
+
+# Create the HTML tag to style the text
+styled_text <- tags$span(style = "color: blue; font-size: 20px; font-weight: bold;", summary_text)
+
+# Print styled text
+browsable(styled_text)
+
+```
+
+## PCA Plot
+
+The PCA plot visualizes the variance in gene expression across the conditions. The principal components (PC1 and PC2) capture the majority of the variance in the dataset, and the plot helps identify any major clustering patterns based on conditions (e.g., U251 knockdowns vs controls).
+
+
+```{r pca_plotting, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='hide', fig.width=6, fig.height=5}
+vsd <- vst(dds, blind=FALSE)
+#meanSdPlot(assay(vsd))
+#plotPCA(vsd, intgroup="conditions")
+
+pca_data <- plotPCA(vsd, intgroup = "conditions", returnData = TRUE)
+
+percentVar <- round(100 * attr(pca_data, "percentVar"))
+
+# Assuming 'pca_data' is your PCA results data frame containing the PCA coordinates and group labels
+pca_plot <- ggplot(pca_data, aes(x = PC1, y = PC2, color = conditions)) +
+    geom_jitter(size = 4, alpha = 0.5, width = 0.1, height = 0.1) +  # Adjust point size and transparency
+    labs(title = "PCA Plot", x = paste0("PC1: ", percentVar[1], "% variance"),
+         y = paste0("PC2: ", percentVar[2], "% variance")) +
+    theme_minimal(base_size = 15) +  # Use a minimal theme
+    theme(
+      plot.background = element_rect(fill = "white", color = NA),
+      panel.background = element_rect(fill = "white", color = NA),  # Remove gray background
+      panel.border = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),  # Remove minor grid lines
+      axis.line = element_line(linewidth = 1, color = "black"),  # Update to use linewidth
+      legend.position = "right",  # Adjust legend position
+      legend.title = element_blank(),  # Remove legend title
+      plot.margin = margin(0, 0, 0, 0)
+    ) +
+    scale_color_brewer(palette = "Set1") # Use a ColorBrewer palette for colors
+  
+# Display the customized PCA plot
+print(pca_plot)
+
+ggsave(filename = "pca_plot.png", plot = pca_plot, width = 20, height = 10, units = "cm")
+
+
+```
+
+
+## Cluster Dendogram
+
+The cluster dendrogram visualizes the hierarchical clustering of RNA-seq samples based on their expression profiles. This analysis uses the distance between samples, calculated from the gene expression values, to group similar samples together. The dendrogram allows us to observe how closely related the samples are to each other based on their gene expression patterns.
+
+```{r cluster_dendogram, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='hide', fig.width=6, fig.height=5}
+
+mat <- assay(vsd)
+# Calculate distances between samples
+sample_dists <- dist(t(mat))  # transpose to calculate distance between samples
+
+# Create a hierarchical clustering object
+sample_clustering <- hclust(sample_dists, method="complete")  # complete linkage for clustering
+
+# Plot the dendrogram
+plot(sample_clustering, main="Sample Dendrogram", xlab="", sub="", ylab="Distance", cex=0.9, labels = colnames(mat))
+
+
+```
+
+## Heatmaps
+
+In this section, heatmaps are used to illustrate the expression patterns of differentially expressed genes across conditions, showing how genes are regulated under different treatments. 
+
+The heatmaps display the top differentially expressed genes between various conditions. The colors represent the normalized expression levels of the genes, where green indicates low expression and red indicates high expression. 
+
+```{r heat_maps, eval=FALSE, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='hide', fig.width=6, fig.height=5}
+
+# Function to obtain DESeq2 results for a specific comparison
+
+lfc_thresh <- log2(2)  #  (i.e., FC > 2)
+alpha <- 0.05
+exp_thresh <- 50
+
+
+get_deseq_results <- function(dds, comparison) {
+  res <- results(dds, contrast = c("conditions", comparison[2], comparison[1]), alpha = alpha)
+  resOrdered <- res %>% 
+  as.data.frame() %>%
+  dplyr::filter(padj < alpha, 
+                abs(log2FoldChange) > lfc_thresh,
+                baseMean > exp_thresh) %>%
+  dplyr::arrange(desc(abs(log2FoldChange)))
+  return(resOrdered)
+}
+
+
+
+# Define the comparisons you want to make
+comparisons <- list(
+ c("U251_pfkfb3_kd", "U251_scr"),
+  c("U251_pfk1m_kd", "U251_scr"),
+  c("U251_pfk1l_kd", "U251_scr")
+)
+
+
+# Define colors for the annotations
+
+ann_colors <- list(Condition = c(
+  "U251_scr"        = "#4E79A7",  # deep blue
+  "U251_pfkfb3_kd"  = "#F28E2B",  # orange
+  "U251_pfk1m_kd"   = "#FBB4AE",  # coral pink
+  "U251_pfk1l_kd"   = "#E15759"   # coral red
+))
+
+
+# Define color palette: green for low expression and red for high expression
+color_palette <- colorRampPalette(c("red", "black", "green"))(100)
+
+
+# Function to create and plot a heatmap based on specified conditions
+plot_heatmap <- function(comparison, expr_data, coldata, top_genes, ann_colors, color_palette, output_dir) {
+# Filter coldata and expression data for the desired conditions
+filtered_coldata <- coldata[coldata$conditions %in% comparison, ]
+filtered_expr_data <- expr_data[top_genes, rownames(filtered_coldata)]
+  
+  
+# Create a color annotation for the heatmap
+annotation_col <- data.frame(Condition = filtered_coldata$conditions)
+rownames(annotation_col) <- rownames(filtered_coldata)
+  
+# Subset annotation colors to only include relevant conditions
+ann_colors_subset <- list(Condition = ann_colors$Condition[unique(comparison)])
+  
+# Order the samples by condition for clear separation
+ordered_samples <- order(filtered_coldata$conditions)
+  
+# Set the file name for saving the plot
+comparison_name <- paste(comparison, collapse = "_vs_")
+file_name <- file.path(output_dir, paste0("heatmap_threshold50_", comparison_name, ".png"))
+# Open a PNG device
+png(file_name, width = 4000, height = 3000, res = 500)  # You can adjust the resolution and dimensions
+  
+# Plot the heatmap
+pheatmap(filtered_expr_data[, ordered_samples, drop = FALSE],
+         annotation_col = annotation_col[ordered_samples, , drop=FALSE],
+         annotation_colors = ann_colors_subset,
+         scale = "row",  # Optionally scale genes to have mean=0 and sd=1
+         cluster_rows = TRUE,  # Cluster genes
+         cluster_cols = FALSE,  # Do not cluster samples
+         show_rownames = FALSE,  # Optionally hide gene names
+         color = color_palette,
+         show_colnames = TRUE,  # Optionally show sample names
+         gaps_col = which(diff(filtered_coldata$conditions[ordered_samples]) != 0),  # Add gap between groups
+         border_color = "NA")
+
+# Close the PNG device to save the file
+dev.off()
+
+}
+
+# Define the output directory for saving heatmaps
+output_dir <- "heatmaps"  # Replace with your desired directory
+dir.create(output_dir, showWarnings = FALSE)  # Create the directory if it doesn't exist
+
+# Extract the matrix of variance-stabilized data
+expr_data <- assay(vsd)
+
+
+# Loop over each comparison to generate results and plot the heatmap
+lapply(comparisons, function(comparison) {
+  resOrdered <- get_deseq_results(dds, comparison)
+  # Select the top differentially expressed genes (e.g., top 50)
+  top_genes <- head(rownames(resOrdered), 1000)
+  
+  # Filter expression data to include only the top differentially expressed genes
+  filtered_expr_data <- expr_data[top_genes, ]
+  
+  plot_heatmap(comparison, expr_data = filtered_expr_data, coldata = colData(dds), 
+               top_genes = top_genes, ann_colors = ann_colors, color_palette = color_palette, output_dir = output_dir)
+})
+
+
+```
+
+
+```{r show_heatmaps, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='asis', fig.width=6, fig.height=5}
+
+files <- list.files("heatmaps", pattern = "*.png", full.names = TRUE)
+
+# Create a dropdown menu to select condition
+dropdown_html <- "<select id='condition-select' onchange='showHeatmap(this.value)'>"
+dropdown_html <- paste0(dropdown_html, "<option value=''>Select a Condition</option>")
+for (file in files) {
+  condition_name <- gsub("heatmap_|\\.png", "", basename(file))  # Extract condition name from file name
+  dropdown_html <- paste0(dropdown_html, "<option value='", file, "'>", condition_name, "</option>")
+}
+dropdown_html <- paste0(dropdown_html, "</select>")
+
+# Default display the first heatmap
+first_image <- files[1]  # Select the first image by default
+image_html <- paste0("<div id='heatmap-container'><img src='", first_image, "' id='heatmap-img' width='600'></div>")
+
+
+# JavaScript to update the image based on selection
+js_script <- "
+<script>
+function showHeatmap(imagePath) {
+  var img = document.getElementById('heatmap-img');
+  if (imagePath) {
+    img.src = imagePath;
+    img.style.display = 'block';
+  } else {
+    img.style.display = 'none';
+  }
+}
+</script>
+"
+
+# Combine the HTML for dropdown and image container
+html_output <- paste0(dropdown_html, image_html, js_script)
+
+# Output the HTML to show in the report
+cat(html_output)
+
+```
+## Volcano Plot
+
+The volcano plot is a graphical representation of the differential expression analysis results, designed to visualize the relationship between statistical significance (adjusted p-value) and the magnitude of change (log2 fold change).
+The x-axis represents the log2 fold change, and the y-axis represents the -log10 of the adjusted p-value. This plot helps identify genes that are both statistically significant and exhibit substantial changes in expression levels.
+
+```{r volcano_plot, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='hide', fig.width=6, fig.height=5}
+
+t_log2FC <- log2(2)
+t_padj <- 0.05
+exp_thresh <- 50
+neg_lpadj_lim <- 250
+l2FC_lim <- 5
+
+comparisons <- c("U251_pfkfb3_kd", "U251_pfk1m_kd", "U251_pfk1l_kd")
+
+# Loop through each comparison
+lapply(comparisons, function(test) {
+  ctrl <- "U251_scr"  # Control group
+  
+  res_df <- as.data.frame(results(dds, contrast = c("conditions", test, ctrl), alpha = t_padj)) %>%
+    na.omit() %>%
+    rownames_to_column("gene_id") %>%
+    filter(baseMean > exp_thresh) %>%
+    mutate(
+      padj = if_else(padj == 0, .Machine$double.xmin, padj),
+      log10padj = -log10(padj),
+      clFC = pmax(pmin(log2FoldChange, l2FC_lim), -l2FC_lim),
+      color = case_when(
+        padj < t_padj & log2FoldChange > t_log2FC ~ "up",
+        padj < t_padj & log2FoldChange < -t_log2FC ~ "down",
+        TRUE ~ "no_effect"
+      )
+    )
+  
+  annotation_res_df <- as.data.frame(rowData(dds)) %>%
+    separate(description, into = c("description", "source"), sep = " \\[Source:") %>%
+    dplyr::select(gene_id, symbol, description) %>%
+    right_join(res_df, by = "gene_id") %>%
+    mutate(
+      mark = if_else(abs(log2FoldChange) > l2FC_lim | log10padj > neg_lpadj_lim, "out", "in")
+    )
+  
+  # Count DEGs
+  n_up <- sum(annotation_res_df$color == "up", na.rm = TRUE)
+  n_down <- sum(annotation_res_df$color == "down", na.rm = TRUE)
+  
+  # Top 30 DEGs for labeling
+  top30degs <- annotation_res_df %>%
+    filter(padj < t_padj, abs(log2FoldChange) > t_log2FC) %>%
+    arrange(padj) %>%
+    slice_head(n = 30) %>%
+    pull(symbol)
+  
+  annotation_res_df$deg_label <- if_else(annotation_res_df$symbol %in% top30degs, annotation_res_df$symbol, NA)
+  
+  y_axis_limit <- ifelse(test == "U251_pfk1l_kd", neg_lpadj_lim + 50, neg_lpadj_lim)
+  
+  p <- ggplot(annotation_res_df, aes(x = clFC, y = log10padj, color = color, shape = mark, label = deg_label)) +
+    geom_vline(xintercept = c(-t_log2FC, t_log2FC), color = "gray40", linetype = "dashed") +
+    geom_hline(yintercept = -log10(t_padj), color = "gray40", linetype = "dashed") +
+    geom_point(size = 1.8, alpha = 0.6) +
+    geom_text_repel(size = 2.5, max.overlaps = Inf, min.segment.length = 0, show.legend = FALSE) +
+    scale_shape_manual(values = c("in" = 19, "out" = 17)) +
+    scale_color_manual(
+      values = c("down" = "#E41A1C", "no_effect" = "#dddddd", "up" = "#095228"),
+      labels = c("down" = "downregulated", "no_effect" = "unchanged", "up" = "upregulated")
+    ) +
+    scale_x_continuous(breaks = seq(-l2FC_lim, l2FC_lim, 1)) +
+    coord_cartesian(xlim = c(-l2FC_lim, l2FC_lim), ylim = c(0, y_axis_limit)) +
+    labs(
+      color = "", shape = "", 
+      x = expression("log"[2]*" FC"), 
+      y = expression("-log"[10]*" adjusted p-value"),
+      title = paste("Differentially expressed genes identified\nin", test, "vs", ctrl),
+      caption = paste("Downregulated genes:", n_down, "| Upregulated genes:", n_up)
+    ) +
+    theme_classic() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      plot.caption = element_text(hjust = 0.5, size = 10, face = "italic"),
+      legend.position = c(0.85, 0.8)
+    )
+  
+  ggsave(
+    filename = paste0("volcano_", test, "_vs_", ctrl, ".png"),
+    plot = p,
+    path = "volcano plots/", width = 6, height = 6, units = "in", dpi = 300)
+})
+  
+### *** add genes of interest rather than the 30 topgenes###
+```
+```{r show_volcano_plots, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='asis', fig.width=6, fig.height=5}
+
+files <- list.files("C:/Users/CHAMAAF/OneDrive/Documents/KAUST/GitHub/RNA-SEq_Eleonora/glycolysis_gene_kd/results/plots", pattern = "volcano_.*.png", full.names = TRUE)
+
+# Create a dropdown menu to select condition
+dropdown_html <- "<select id='condition-select' onchange='showVolcanoPlot(this.value)'>"
+dropdown_html <- paste0(dropdown_html, "<option value=''>Select a Condition</option>")
+for (file in files) {
+  condition_name <- gsub("volcano_|\\.png", "", basename(file))  # Extract condition name from file name
+  dropdown_html <- paste0(dropdown_html, "<option value='", file, "'>", condition_name, "</option>")
+}
+dropdown_html <- paste0(dropdown_html, "</select>")
+
+# Default display the first volcano plot
+first_image <- files[3]  # Select the first image by default
+image_html <- paste0("<div id='volcano-container'><img src='", first_image, "' id='volcano-img' width='600'></div>")
+
+# JavaScript to update the image based on selection
+js_script <- "
+<script>
+function showVolcanoPlot(imagePath) {
+  var img = document.getElementById('volcano-img');
+  if (imagePath) {
+    img.src = imagePath;
+    img.style.display = 'block';
+  } else {
+    img.style.display = 'none';
+  }
+}
+</script>
+"
+
+# Combine the HTML for dropdown, image container, and JavaScript
+html_output <- paste0(dropdown_html, image_html, js_script)
+
+# Output the HTML to show in the report
+cat(html_output)
+
+```
+
+## Venn Diagram
+
+Venn diagrams are useful for visualizing the overlap of differentially expressed genes (DEGs) across multiple experimental conditions.
+
+```{r Venn_Diagram, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='hide', fig.width=6, fig.height=5}
+lfcThreshold <- log2(2)
+alpha <- 0.05
+expLevel <- 50
+
+ctrl_1 <- "U251_scr" 
+test_1 <- "U251_pfkfb3_kd" 
+
+ctrl_2 <- "U251_scr" 
+test_2 <- "U251_pfk1m_kd" 
+
+ctrl_3 <- "U251_scr" 
+test_3 <- "U251_pfk1l_kd"
+
+# generate annotations from the dds object metadata
+gene_annotations <- as.data.frame(rowData(dds)) |>  
+  dplyr::select("gene_id", "symbol")
+
+ensembl <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+#listAttributes(ensembl)
+listFilters(ensembl)
+# Retrieve gene descriptions with the biomaRt package
+biomaRt_descriptions <- getBM(
+  attributes = c("ensembl_gene_id", "description"),
+  filters = "ensembl_gene_id",
+  values = rownames(dds),
+  mart = ensembl
+)
+
+annotations <- inner_join(gene_annotations, biomaRt_descriptions, by = c("gene_id" = "ensembl_gene_id")) |> 
+  separate(col = description, into = c("description", "x"), sep = "\\[Source:") %>%
+  dplyr::select(-x)
+
+
+res_pfkfb3 <- results(dds, contrast = c("conditions", test_1, ctrl_1), 
+              alpha = alpha) |> 
+  as.data.frame() |> 
+  rownames_to_column("gene_id") |>
+  na.omit() |>
+  dplyr::filter(padj < alpha, 
+                abs(log2FoldChange) > lfcThreshold,
+                baseMean > expLevel) |>
+  dplyr::arrange(padj) |>
+  left_join(annotations, by = "gene_id")
+
+
+write.csv(res_pfkfb3, file = "results_pfkfb3.csv", row.names = FALSE)
+
+
+res_pfk1m <- results(dds, contrast = c("conditions", test_2, ctrl_2), 
+               alpha = alpha) |> 
+  as.data.frame() |> 
+  rownames_to_column("gene_id") |>
+  na.omit() |>
+  dplyr::filter(padj < alpha, 
+                abs(log2FoldChange) > lfcThreshold,
+                baseMean > expLevel) |>
+  dplyr::arrange(padj) |>
+  left_join(annotations, by = "gene_id")
+
+write.csv(res_pfk1m, file = "results_pfk1m.csv", row.names = FALSE)
+
+res_pfk1l <- results(dds, contrast = c("conditions", test_3, ctrl_3), 
+              alpha = alpha) |> 
+  as.data.frame() |> 
+  rownames_to_column("gene_id") |>
+  na.omit() |>
+  dplyr::filter(padj < alpha, 
+                abs(log2FoldChange) > lfcThreshold,
+                baseMean > expLevel) |>
+  dplyr::arrange(padj) |>
+  left_join(annotations, by = "gene_id")
+
+
+write.csv(res_pfk1l, file = "results_pfk1l.csv", row.names = FALSE)
+
+deg_pfkfb3 <- res_pfkfb3 |> dplyr::filter(padj < 0.05) |> pull(gene_id)
+deg_pfk1m <- res_pfk1m |> dplyr::filter(padj < 0.05) |> pull(gene_id)
+deg_pfk1l <- res_pfk1l |> dplyr::filter(padj < 0.05) |> pull(gene_id)
+
+
+venn_plot <- venn.diagram(
+  x = list(
+    "pfkfb3_kd vs scr" = deg_pfkfb3,
+    "pfk1m_kd vs scr" = deg_pfk1m,
+    "pfk1l_kd vs scr" = deg_pfk1l),
+  category.names = c("pfkfb3_kd vs scr", "pfk1m_kd vs scr", "pfk1l_kd vs scr"),
+  filename = "venn_diagram.png",
+  output = TRUE,
+  imagetype = "png",
+  height = 5000,
+  width = 5000,
+  resolution = 500,
+  lwd = 2,
+  col = c("#1f77b4", "#ff7f0e", "#2ca02c"), # c("darkblue", "darkgreen", "yellow"),
+  fill = c("#6bb8eb", "#ffb74d", "#5ed36f"),
+  alpha = 0.5,
+  cex = 2,
+  fontfamily = "sans",
+  fontface = "bold",
+  cat.cex = 2,
+  cat.fontfamily = "sans",
+  cat.fontface = "bold",
+  cat.col = c("#1f77b4", "#ff7f0e", "#2ca02c"),
+  cat.pos = c(-30, 30, 180)
+  )
+
+
+
+common_genes <- Reduce(intersect, list(deg_pfkfb3, deg_pfk1m, deg_pfk1l))
+common_gene_symbols <- annotations %>% 
+  dplyr::filter(gene_id %in% common_genes) %>%
+  dplyr::select(gene_id, symbol)
+
+print(common_genes)
+
+unique_pfkfb3 <- setdiff(deg_pfkfb3, union(deg_pfk1m, deg_pfk1l))
+unique_pfk1m  <- setdiff(deg_pfk1m, union(deg_pfkfb3, deg_pfk1l))
+unique_pfk1l  <- setdiff(deg_pfk1l, union(deg_pfkfb3, deg_pfk1m))
+
+go_enrich_common_genes <- enrichGO(gene = common_genes,
+                      OrgDb = org.Hs.eg.db,
+                      keyType = 'ENSEMBL',
+                      ont = "BP",
+                      pvalueCutoff = 0.05, 
+                      pAdjustMethod = "BH",
+                      universe = names(dds), # change into dds_U251 if loaded from PC#all the gene express in this study
+                      qvalueCutoff = 0.10,
+                      minGSSize = 2,
+                      maxGSSize = 500,
+                      readable = FALSE,
+                      pool = FALSE)
+
+go_enrich_common_genes_df <- as.data.frame(go_enrich_common_genes)
+
+simplified_go_enrich_common_genes <- simplify(go_enrich_common_genes, cutoff = 0.8, by = "p.adjust", select_fun = min)
+
+simplified_go_enrich_common_genes_df <- as.data.frame(simplified_go_enrich_common_genes)
+
+write.csv(as.data.frame(go_enrich_common_genes), paste0("go_enrich_venndiagram_common_genes_BP_table.csv"), row.names = FALSE)
+
+write.csv(as.data.frame(simplified_go_enrich_common_genes), paste0("simplified_go_enrich_venndiagram_common_genes_BP_table.csv"), row.names = FALSE)
+
+
+go_enrich_unique_pfkfb3 <- enrichGO(gene = unique_pfkfb3,
+                      OrgDb = org.Hs.eg.db,
+                      keyType = 'ENSEMBL',
+                      ont = "BP",
+                      pvalueCutoff = 0.05, 
+                      pAdjustMethod = "BH",
+                      universe = names(dds), # change into dds_U251 if loaded from PC#all the gene express in this study
+                      qvalueCutoff = 0.10,
+                      minGSSize = 2,
+                      maxGSSize = 500,
+                      readable = FALSE,
+                      pool = FALSE)
+
+go_enrich_unique_pfkfb3_df <- as.data.frame(go_enrich_unique_pfkfb3)
+
+go_enrich_unique_pfk1m <- enrichGO(gene = unique_pfk1m,
+                      OrgDb = org.Hs.eg.db,
+                      keyType = 'ENSEMBL',
+                      ont = "BP",
+                      pvalueCutoff = 0.05, 
+                      pAdjustMethod = "BH",
+                      universe = names(dds), # change into dds_U251 if loaded from PC#all the gene express in this study
+                      qvalueCutoff = 0.10,
+                      minGSSize = 2,
+                      maxGSSize = 500,
+                      readable = FALSE,
+                      pool = FALSE)
+
+go_enrich_unique_pfk1m_df <- as.data.frame(go_enrich_unique_pfk1m)
+
+
+go_enrich_unique_pfk1l <- enrichGO(gene = unique_pfk1l,
+                      OrgDb = org.Hs.eg.db,
+                      keyType = 'ENSEMBL',
+                      ont = "BP",
+                      pvalueCutoff = 0.05, 
+                      pAdjustMethod = "BH",
+                      universe = names(dds), # change into dds_U251 if loaded from PC#all the gene express in this study
+                      qvalueCutoff = 0.10,
+                      minGSSize = 2,
+                      maxGSSize = 500,
+                      readable = FALSE,
+                      pool = FALSE)
+
+go_enrich_unique_pfk1l_df <- as.data.frame(go_enrich_unique_pfk1l)
+
+```
+
+
+```{r Venn_Diagram_show, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='asis', fig.width=6, fig.height=5}
+
+img(src = "C:/Users/CHAMAAF/OneDrive/Documents/KAUST/GitHub/RNA-Seq_Eleonora/glycolysis_gene_kd/venn_diagram.png", width = "600px", height = "600px")
+
+
+```
+
+## Gene Ontology (GO) Enrichment Analysis
+
+Gene Ontology (GO) enrichment analysis is a method used to identify biological processes, molecular functions, and cellular components that are overrepresented in a set of differentially expressed genes (DEGs).
+GO enrichment analysis provides insights into the biological implications of gene expression changes observed in experiments. It helps to identify key pathways and biological processes that may be regulated in response to experimental treatments or conditions, making it an essential tool in understanding complex biological phenomena.
+
+```{r Go_enrich, eval=FALSE, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='asis', fig.width=6, fig.height=5}
+# Define parameters
+lfcThreshold <- log2(2)
+alpha <- 0.05
+expLevel <- 50
+conditions <- c("U251_pfkfb3_kd", "U251_pfk1m_kd", "U251_pfk1l_kd")
+
+# Create empty list to store figures and tables for each condition
+all_go_plots <- list()
+all_go_tables <- list()
+all_go_terms <- list()
+
+dir.create("go_plots", showWarnings = FALSE)
+
+# Loop through each condition
+for (test in conditions) {
+  ctrl <- "U251_scr"  # Define control
+  
+  # Run DESeq2 analysis
+  res_df <- results(dds, contrast = c("conditions", test, ctrl), 
+                    alpha = alpha) |> 
+    as.data.frame() |> 
+    rownames_to_column("gene_id") |>
+    na.omit() |>
+    dplyr::filter(padj < alpha, 
+                abs(log2FoldChange) > lfcThreshold,
+                baseMean > expLevel) |>
+    dplyr::arrange(padj) |>
+    left_join(annotations, by = "gene_id")
+  
+  # Filter significant genes
+  sig_genes <- res_df |>
+    dplyr::filter(padj < alpha, baseMean >= expLevel) |> pull(gene_id)
+  
+  go_enrich_bp <- enrichGO(gene = sig_genes,
+                           OrgDb = org.Hs.eg.db,
+                           keyType = 'ENSEMBL',
+                           ont = "BP",
+                           pvalueCutoff = 0.05, 
+                           pAdjustMethod = "BH",
+                           universe = names(dds), 
+                           qvalueCutoff = 0.10,
+                           minGSSize = 2,
+                           maxGSSize = 500,
+                           readable = FALSE,
+                           pool = FALSE)
+  
+  go_enrich_cc <- enrichGO(gene = sig_genes,
+                           OrgDb = org.Hs.eg.db,
+                           keyType = 'ENSEMBL',
+                           ont = "CC",
+                           pvalueCutoff = 0.05, 
+                           pAdjustMethod = "BH",
+                           universe = names(dds), 
+                           qvalueCutoff = 0.10,
+                           minGSSize = 2,
+                           maxGSSize = 500,
+                           readable = FALSE,
+                           pool = FALSE)
+  
+  go_enrich_mf <- enrichGO(gene = sig_genes,
+                           OrgDb = org.Hs.eg.db,
+                           keyType = 'ENSEMBL',
+                           ont = "MF",
+                           pvalueCutoff = 0.05, 
+                           pAdjustMethod = "BH",
+                           universe = names(dds), 
+                           qvalueCutoff = 0.10,
+                           minGSSize = 2,
+                           maxGSSize = 500,
+                           readable = FALSE,
+                           pool = FALSE)
+  # Simplify and plot BP
+  simplified_go_term_bp <- simplify(go_enrich_bp, cutoff = 0.8, by = "p.adjust", select_fun = min)
+  p_bp <- dotplot(simplified_go_term_bp, showCategory = 25, label_format=45) +
+    labs(title = paste(test, "GO Enrichment (BP)"), size = "count") +
+    scale_fill_continuous(name = "Adjusted\np-value", low = "red", high = "blue") +
+    theme(axis.title = element_text(size = 14), legend.title = element_text(size = 14),
+    axis.text.y  = element_text(hjust = 1, size = 12),
+    legend.text = element_text(size = 14)
+  ) +
+  # Wrap text for the y-axis labels (GO terms)
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 60))
+  
+  # Simplify and plot CC
+  simplified_go_term_cc <- simplify(go_enrich_cc, cutoff = 0.8, by = "p.adjust", select_fun = min)
+  p_cc <- dotplot(simplified_go_term_cc, showCategory = 25, label_format=45) +
+    labs(title = paste(test, "GO Enrichment (CC)"), size = "count") +
+    scale_fill_continuous(name = "Adjusted\np-value", low = "red", high = "blue") +
+    theme(axis.title = element_text(size = 14), legend.title = element_text(size = 14),
+    axis.text.y  = element_text(hjust = 1, size = 12),
+    legend.text = element_text(size = 14)
+  ) +
+  # Wrap text for the y-axis labels (GO terms)
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 60))
+  
+  # Simplify and plot MF
+  simplified_go_term_mf <- simplify(go_enrich_mf, cutoff = 0.8, by = "p.adjust", select_fun = min)
+  p_mf <- dotplot(simplified_go_term_mf, showCategory = 25, label_format=45) +
+    labs(title = paste(test, "GO Enrichment (MF)"), size = "count") +
+    scale_fill_continuous(name = "Adjusted\np-value", low = "red", high = "blue") +
+    theme(axis.title = element_text(size = 14), legend.title = element_text(size = 14),
+    axis.text.y  = element_text(hjust = 1, size = 12),
+    legend.text = element_text(size = 14)
+  ) +
+  # Wrap text for the y-axis labels (GO terms)
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 60))
+  
+  # Store GO terms results
+  all_go_terms[[paste0(test, "_BP")]] <- simplified_go_term_bp
+  all_go_terms[[paste0(test, "_CC")]] <- simplified_go_term_cc
+  all_go_terms[[paste0(test, "_MF")]] <- simplified_go_term_mf
+  
+  # Store each plot in the list
+  all_go_plots[[paste0(test, "_BP")]] <- p_bp
+  all_go_plots[[paste0(test, "_CC")]] <- p_cc
+  all_go_plots[[paste0(test, "_MF")]] <- p_mf
+  
+  # Store the table for each condition
+  all_go_tables[[paste0(test, "_BP")]] <- as.data.frame(simplified_go_term_bp)
+  all_go_tables[[paste0(test, "_CC")]] <- as.data.frame(simplified_go_term_cc)
+  all_go_tables[[paste0(test, "_MF")]] <- as.data.frame(simplified_go_term_mf)
+  
+  # Save plot as image
+  ggsave(filename = paste0("go_plots/go_enrich_", test, "_BP.png"), plot = p_bp, width = 10, height = 8, units = "in")
+  ggsave(filename = paste0("go_plots/go_enrich_", test, "_CC.png"), plot = p_cc, width = 10, height = 8, units = "in")
+  ggsave(filename = paste0("go_plots/go_enrich_", test, "_MF.png"), plot = p_mf, width = 10, height = 8, units = "in")
+  
+  # Save the tables as CSV files for each category (BP, CC, MF)
+  write.csv(as.data.frame(go_enrich_bp), paste0("go_plots/go_enrich_", test, "_BP_table.csv"), row.names = FALSE)
+  write.csv(as.data.frame(go_enrich_cc), paste0("go_plots/go_enrich_", test, "_CC_table.csv"), row.names = FALSE)
+  write.csv(as.data.frame(go_enrich_mf), paste0("go_plots/go_enrich_", test, "_MF_table.csv"), row.names = FALSE)
+}
+
+```
+### GO Terms for only BP, and doing ALL genes, then down and upregulated alone
+```{r}
+
+# Define parameters
+lfcThreshold <- log2(2)
+alpha <- 0.05
+expLevel <- 50
+conditions <- c("U251_pfkfb3_kd", "U251_pfk1m_kd", "U251_pfk1l_kd")
+
+# Create output directory
+dir.create("Go_Terms", showWarnings = FALSE)
+
+# Initialize list to store all GO BP terms
+new_go_terms <- list()
+
+
+# Loop through each condition
+for (test in conditions) {
+  ctrl <- "U251_scr"
+  
+  # DESeq2 analysis
+  res_df <- results(dds, contrast = c("conditions", test, ctrl), alpha = alpha) |>
+    as.data.frame() |> 
+    rownames_to_column("gene_id") |>
+    na.omit() |>
+    dplyr::filter(padj < alpha, abs(log2FoldChange) > lfcThreshold, baseMean > expLevel) |>
+    dplyr::arrange(padj) |>
+    left_join(annotations, by = "gene_id")
+
+  # Get all, up, and downregulated gene IDs
+  all_genes <- res_df |>
+    dplyr::filter(padj < alpha, baseMean >= expLevel) |> pull(gene_id)
+  up_genes <- res_df |>
+    dplyr::filter(padj < alpha, baseMean >= expLevel, log2FoldChange > lfcThreshold) |> pull(gene_id)
+  down_genes <- res_df |>
+    dplyr::filter(padj < alpha, baseMean >= expLevel, log2FoldChange < -lfcThreshold) |> pull(gene_id)
+
+  run_go_bp <- function(gene_list, tag) {
+    enrichGO(
+      gene = gene_list,
+      OrgDb = org.Hs.eg.db,
+      keyType = 'ENSEMBL',
+      ont = "BP",
+      pvalueCutoff = 0.05,
+      pAdjustMethod = "BH",
+      universe = names(dds),
+      qvalueCutoff = 0.10,
+      minGSSize = 2,
+      maxGSSize = 500,
+      readable = FALSE
+    ) |> simplify(cutoff = 0.8, by = "p.adjust", select_fun = min) -> go_bp
+
+    if (!is.null(go_bp) && nrow(as.data.frame(go_bp)) > 0) {
+      
+      # Save object to list for reuse
+      new_go_terms[[paste0(test, "_", tag)]] <<- go_bp
+      
+      
+      p <- dotplot(go_bp, showCategory = 25, label_format=45) +
+        labs(title = paste(test, tag, "GO Enrichment (BP)"), size = "count") +
+        scale_fill_continuous(name = "Adjusted\\np-value", low = "red", high = "blue") +
+        theme(axis.title = element_text(size = 14), legend.title = element_text(size = 14),
+              axis.text.y = element_text(hjust = 1, size = 12),
+              legend.text = element_text(size = 14)) +
+        scale_y_discrete(labels = function(x) str_wrap(x, width = 60))
+
+      ggsave(filename = paste0("Go_Terms/go_enrich_", test, "_", tag, "_BP.png"), plot = p, width = 10, height = 8)
+      write.csv(as.data.frame(go_bp), paste0("Go_Terms/go_enrich_", test, "_", tag, "_BP_table.csv"), row.names = FALSE)
+    }
+  }
+
+  run_go_bp(all_genes, "all")
+  run_go_bp(up_genes, "up")
+  run_go_bp(down_genes, "down")
+  
+  # Save all GO terms object for later use
+save(new_go_terms, file = "Go_Terms/new_go_terms.RData")
+}
+
+
+```
+
+### GO Results for U251_pfkfb3_kd
+
+```{r Go_enrich_PFKFB3, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='asis', fig.width=6, fig.height=5}
+
+
+  # Display the table using DT::datatable
+  cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GO Enrichment Table (BP)</h4>"))
+  DT::datatable(read.csv(paste0("go_enrich_U251_pfkfb3_kd_BP_table.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+                caption = paste("GO Enrichment Results for U251_pfkfb3_kd (BP)"))
+  
+  cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GO Enrichment Table (CC)</h4>"))
+  DT::datatable(read.csv(paste0("go_enrich_U251_pfkfb3_kd_CC_table.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+                caption = paste("GO Enrichment Results for U251_pfkfb3_kd (CC)"))
+  
+  cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GO Enrichment Table (MF)</h4>"))
+  DT::datatable(read.csv(paste0("go_enrich_U251_pfkfb3_kd_MF_table.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+                caption = paste("GO Enrichment Results for U251_pfkfb3_kd (MF)"))
+  
+
+  
+# List the GO enrichment plot images
+  
+cat(paste0("<p style='font-size:18px; margin-top:20px; margin-bottom:20px;'>In the results of the GO enrichment analysis, the most significant 25 Terms were selected for display.</p>"))
+  
+files <- list.files("C:/Users/CHAMAAF/OneDrive/Documents/KAUST/GitHub/RNA-Seq_Eleonora/glycolysis_gene_kd", 
+                    pattern = "go_enrich_U251_pfkfb3.*.png", full.names = TRUE)
+
+# Create a dropdown menu to select condition
+dropdown_html <- "<select id='condition-select' onchange='showGoPlot(this.value)'>"
+dropdown_html <- paste0(dropdown_html, "<option value=''>Select a Condition</option>")
+for (file in files) {
+  condition_name <- gsub("go_enrich_|\\.png", "", basename(file))  # Extract condition name from file name
+  dropdown_html <- paste0(dropdown_html, "<option value='", file, "'>", condition_name, "</option>")
+}
+dropdown_html <- paste0(dropdown_html, "</select>")
+
+# Default display the first GO enrichment plot
+first_image <- files[1]  # Select the first image by default
+image_html <- paste0("<div id='go-container'><img src='", first_image, "' id='go-img' width='600'></div>")
+
+# JavaScript to update the image based on selection
+js_script <- "
+<script>
+function showGoPlot(imagePath) {
+  var img = document.getElementById('go-img');
+  if (imagePath) {
+    img.src = imagePath;
+    img.style.display = 'block';
+  } else {
+    img.style.display = 'none';
+  }
+}
+</script>
+"
+
+# Combine the HTML for dropdown, image container, and JavaScript
+html_output <- paste0(dropdown_html, image_html, js_script)
+
+# Output the HTML to show in the report
+cat(html_output)
+  
+```
+
+### GO Results for U251_pfk1m_kd
+
+```{r Go_enrich_PFK1m, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='asis', fig.width=6, fig.height=5}
+# Display the table using DT::datatable
+  cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GO Enrichment Table (BP)</h4>"))
+  DT::datatable(read.csv(paste0("go_enrich_U251_pfk1m_kd_BP_table.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+                caption = paste("GO Enrichment Results for U251_pfk1m_kd (BP)"))
+  
+  cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GO Enrichment Table (CC)</h4>"))
+  DT::datatable(read.csv(paste0("go_enrich_U251_pfk1m_kd_CC_table.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+                caption = paste("GO Enrichment Results for U251_pfk1m_kd (CC)"))
+  
+  cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GO Enrichment Table (MF)</h4>"))
+  DT::datatable(read.csv(paste0("go_enrich_U251_pfk1m_kd_MF_table.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+                caption = paste("GO Enrichment Results for U251_pfk1m_kd (MF)"))
+  
+
+# List the GO enrichment plot images
+  
+cat(paste0("<p style='font-size:18px; margin-top:20px; margin-bottom:20px;'>In the results of the GO enrichment analysis, the most significant 25 Terms were selected for display.</p>"))
+  
+files_pfk1m <- list.files("C:/Users/CHAMAAF/OneDrive/Documents/KAUST/GitHub/RNA-Seq_Eleonora/glycolysis_gene_kd", 
+                    pattern = "go_enrich_U251_pfk1m.*.png", full.names = TRUE)
+
+# Create a dropdown menu to select condition
+dropdown_html <- "<select id='condition-select' onchange='showGoPlot(this.value)'>"
+dropdown_html <- paste0(dropdown_html, "<option value=''>Select a Condition</option>")
+for (file in files_pfk1m) {
+  condition_name <- gsub("go_enrich_|\\.png", "", basename(file))  # Extract condition name from file name
+  dropdown_html <- paste0(dropdown_html, "<option value='", file, "'>", condition_name, "</option>")
+}
+dropdown_html <- paste0(dropdown_html, "</select>")
+
+# Default display the first GO enrichment plot
+first_image <- files_pfk1m[1]  # Select the first image by default
+image_html <- paste0("<div id='go-container'><img src='", first_image, "' id='go-img' width='600'></div>")
+
+# JavaScript to update the image based on selection
+js_script <- "
+<script>
+function showGoPlot(imagePath) {
+  var img = document.getElementById('go-img');
+  if (imagePath) {
+    img.src = imagePath;
+    img.style.display = 'block';
+  } else {
+    img.style.display = 'none';
+  }
+}
+</script>
+"
+
+# Combine the HTML for dropdown, image container, and JavaScript
+html_output <- paste0(dropdown_html, image_html, js_script)
+
+# Output the HTML to show in the report
+cat(html_output)
+```
+
+### GO Results for U251_pfk1l_kd
+
+```{r Go_enrich_PFK1l, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='asis', fig.width=6, fig.height=5}
+
+# Display the table using DT::datatable
+  cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GO Enrichment Table (BP)</h4>"))
+  DT::datatable(read.csv(paste0("go_enrich_U251_pfk1l_kd_BP_table.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+                caption = paste("GO Enrichment Results for U251_pfk1l_kd (BP)"))
+  
+  cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GO Enrichment Table (CC)</h4>"))
+  DT::datatable(read.csv(paste0("go_enrich_U251_pfk1l_kd_CC_table.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+                caption = paste("GO Enrichment Results for U251_pfk1l_kd (CC)"))
+  
+  cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GO Enrichment Table (MF)</h4>"))
+  DT::datatable(read.csv(paste0("go_enrich_U251_pfk1l_kd_MF_table.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+                caption = paste("GO Enrichment Results for U251_pfk1l_kd (MF)"))
+
+
+# List the GO enrichment plot images
+cat(paste0("<p style='font-size:18px; margin-top:20px; margin-bottom:20px;'>In the results of the GO enrichment analysis, the most significant 25 Terms were selected for display.</p>"))
+  
+files <- list.files("C:/Users/CHAMAAF/OneDrive/Documents/KAUST/GitHub/RNA-SEq_Eleonora/glycolysis_gene_kd", 
+                    pattern = "go_enrich_U251_pfk1l.*.png", full.names = TRUE)
+
+# Create a dropdown menu to select condition
+dropdown_html <- "<select id='condition-select' onchange='showGoPlot(this.value)'>"
+dropdown_html <- paste0(dropdown_html, "<option value=''>Select a Condition</option>")
+for (file in files) {
+  condition_name <- gsub("go_enrich_|\\.png", "", basename(file))  # Extract condition name from file name
+  dropdown_html <- paste0(dropdown_html, "<option value='", file, "'>", condition_name, "</option>")
+}
+dropdown_html <- paste0(dropdown_html, "</select>")
+
+# Default display the first GO enrichment plot
+first_image <- files[1]  # Select the first image by default
+image_html <- paste0("<div id='go-container'><img src='", first_image, "' id='go-img' width='600'></div>")
+
+# JavaScript to update the image based on selection
+js_script <- "
+<script>
+function showGoPlot(imagePath) {
+  var img = document.getElementById('go-img');
+  if (imagePath) {
+    img.src = imagePath;
+    img.style.display = 'block';
+  } else {
+    img.style.display = 'none';
+  }
+}
+</script>
+"
+
+# Combine the HTML for dropdown, image container, and JavaScript
+html_output <- paste0(dropdown_html, image_html, js_script)
+
+# Output the HTML to show in the report
+cat(html_output)
+
+
+```
+
+## Make plots of only the selected GO Terms
+```{r GOTERMS_selected, eval=FALSE, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='asis', fig.width=6, fig.height=5}
+
+simplified_go_term_pfkfb3_bp <- all_go_terms[["U251_pfkfb3_kd_BP"]]
+simplified_go_term_pfk1m_bp <- all_go_terms[["U251_pfk1m_kd_BP"]]
+simplified_go_term_pfk1l_bp <- all_go_terms[["U251_pfk1l_kd_BP"]]
+
+select_GO_pfkfb3 <- c(
+  "GO:0006260", 
+  "GO:0007346",
+  "GO:0007059",
+  "GO:0006913",
+  "GO:0051169",
+  "GO:0006302",
+  "GO:0044843",
+  "GO:2001233",
+  "GO:0042770",
+  "GO:0032508",
+  "GO:0044839",
+  "GO:0007249",
+  "GO:0032922",
+  "GO:0010634",
+  "GO:0009611",
+  "GO:0033157",
+  "GO:0001666",
+  "GO:0030335",
+  "GO:0034504",
+  "GO:0051170",
+  "GO:0031400",
+  "GO:2001026",
+  "GO:0043536",
+  "GO:0051168",
+  "GO:0051054",
+  "GO:0051236",
+  "GO:0071900",
+  "GO:0010638",
+  "GO:0042060",
+  "GO:0001933",
+  "GO:0010595",
+  "GO:2000147",
+  "GO:0010631",
+  "GO:0035331",
+  "GO:0090132",
+  "GO:0001935",
+  "GO:0034248",
+  "GO:0043549",
+  "GO:0030071",
+  "GO:0071456",
+  "GO:0051017",
+  "GO:0010632",
+  "GO:0090130",
+  "GO:0043535",
+  "GO:0043401",
+  "GO:0061723",
+  "GO:0010563",
+  "GO:0043542",
+  "GO:0061572",
+  "GO:0006929",
+  "GO:0042176",
+  "GO:0045936",
+  "GO:0071391",
+  "GO:1902460",
+  "GO:0010464",
+  "GO:0043409",
+  "GO:0010810",
+  "GO:1900180",
+  "GO:0016055"
+)
+
+simplified_go_term_pfkfb3_bp@result <- simplified_go_term_pfkfb3_bp@result[
+  simplified_go_term_pfkfb3_bp@result$ID %in% select_GO_pfkfb3, ]
+
+view(simplified_go_term_pfkfb3_bp)
+
+
+select_plot <- dotplot(simplified_go_term_pfkfb3_bp, showCategory = 20, label_format= 45) +
+    labs(title = paste("GO Enrichment (BP) pfkfb3"), size = "count") +
+    scale_fill_continuous(name = "Adjusted\np-value", low = "red", high = "blue") +
+    theme(axis.title = element_text(size = 14), legend.title = element_text(size = 14),
+    axis.text.y  = element_text(hjust = 1, size = 12),
+    legend.text = element_text(size = 14)
+  ) +
+  # Wrap text for the y-axis labels (GO terms)
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 60))
+
+ggsave(paste0("GO Enrichment (BP) pfkfb3_selected.png"), plot = select_plot, width = 10, height = 8, units = "in")
+
+
+select_GO_pfk1m <- c(
+  "GO:0034248",
+  "GO:0043065",
+  "GO:0043068",
+  "GO:0061136",
+  "GO:2001233",
+  "GO:1902532",
+  "GO:0006364",
+  "GO:0007346",
+  "GO:0042176",
+  "GO:1900038",
+  "GO:0198738",
+  "GO:0016072",
+  "GO:0051604",
+  "GO:1900180",
+  "GO:0071897",
+  "GO:0016049",
+  "GO:0071375",
+  "GO:0140014",
+  "GO:0034599",
+  "GO:0001933",
+  "GO:0030335",
+  "GO:0042326"
+)
+
+simplified_go_term_pfk1m_bp@result <- simplified_go_term_pfk1m_bp@result[
+  simplified_go_term_pfk1m_bp@result$ID %in% select_GO_pfk1m, ]
+
+view(simplified_go_term_pfk1m_bp)
+
+
+select_plot <- dotplot(simplified_go_term_pfk1m_bp, showCategory = 20, label_format= 45) +
+    labs(title = paste("GO Enrichment (BP) pfk1m"), size = "count") +
+    scale_fill_continuous(name = "Adjusted\np-value", low = "red", high = "blue") +
+    theme(axis.title = element_text(size = 14), legend.title = element_text(size = 14),
+    axis.text.y  = element_text(hjust = 1, size = 12),
+    legend.text = element_text(size = 14)
+  ) +
+  # Wrap text for the y-axis labels (GO terms)
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 60))
+
+ggsave(paste0("GO Enrichment (BP) pfk1m_selected.png"), plot = select_plot, width = 10, height = 8, units = "in")
+
+
+select_GO_pfk1l <- c("GO:0034248", "GO:0002181", "GO:0006417", "GO:0016072",
+                     "GO:0043068", "GO:0043065", "GO:0007249", "GO:1901873",
+                     "GO:0016055", "GO:1903311", "GO:1902532", "GO:0009611",
+                     "GO:0000082", "GO:0051017", "GO:0042176", "GO:0006470",
+                     "GO:0060055", "GO:0030335")
+
+
+
+simplified_go_term_pfk1l_bp@result <- simplified_go_term_pfk1l_bp@result[
+  simplified_go_term_pfk1l_bp@result$ID %in% select_GO_pfk1l, ]
+
+view(simplified_go_term_pfk1l_bp)
+
+
+select_plot <- dotplot(simplified_go_term_pfk1l_bp, showCategory = 20, label_format= 45) +
+    labs(title = paste("GO Enrichment (BP) pfk1l"), size = "count") +
+    scale_fill_continuous(name = "Adjusted\np-value", low = "red", high = "blue") +
+    theme(axis.title = element_text(size = 14), legend.title = element_text(size = 14),
+    axis.text.y  = element_text(hjust = 1, size = 12),
+    legend.text = element_text(size = 14)
+  ) +
+  # Wrap text for the y-axis labels (GO terms)
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 60))
+
+ggsave(paste0("GO Enrichment (BP) pfk1l_selected.png"), plot = select_plot, width = 10, height = 8, units = "in")
+
+```
+
+### Make the plots with only the selected NEW GO TERMS
+```{r}
+
+
+GO_U251_pfkfb3_kd_all <- new_go_terms[["U251_pfkfb3_kd_all"]]
+GO_U251_pfkfb3_kd_up <- new_go_terms[["U251_pfkfb3_kd_up"]]
+GO_U251_pfkfb3_kd_down <- new_go_terms[["U251_pfkfb3_kd_down"]]
+
+GO_U251_pfk1m_kd_all <- new_go_terms[["U251_pfk1m_kd_all"]]
+GO_U251_pfk1m_kd_up <- new_go_terms[["U251_pfk1m_kd_up"]]
+GO_U251_pfk1m_kd_down <- new_go_terms[["U251_pfk1m_kd_down"]]
+
+GO_U251_pfk1l_kd_all <- new_go_terms[["U251_pfk1l_kd_all"]]
+GO_U251_pfk1l_kd_up <- new_go_terms[["U251_pfk1l_kd_up"]]
+GO_U251_pfk1l_kd_down <- new_go_terms[["U251_pfk1l_kd_down"]]
+
+
+select_GO_pfkfb3_all <- c(
+  "GO:0001525",
+  "GO:0045765",
+  "GO:0006261",
+  "GO:0050678",
+  "GO:0030510",
+  "GO:0000727",
+  "GO:0006268",
+  "GO:0043410",
+  "GO:0001937",
+  "GO:0060326",
+  "GO:0032496",
+  "GO:1902969",
+  "GO:2001212",
+  "GO:0006270",
+  "GO:0043549",
+  "GO:0009611",
+  "GO:0090288",
+  "GO:0002347",
+  "GO:0010594",
+  "GO:0051338",
+  "GO:0000302",
+  "GO:0032508",
+  "GO:0071900",
+  "GO:0035886",
+  "GO:0043542",
+  "GO:0030509"
+)
+
+
+GO_U251_pfkfb3_kd_all@result <- GO_U251_pfkfb3_kd_all@result[
+  GO_U251_pfkfb3_kd_all@result$ID %in% select_GO_pfkfb3_all, ]
+
+view(GO_U251_pfkfb3_kd_all)
+
+
+select_plot <- dotplot(GO_U251_pfkfb3_kd_all, showCategory = 26, label_format= 45) +
+    labs(title = paste("GO Enrichment (BP) pfkfb3 all"), size = "count") +
+    scale_fill_continuous(name = "Adjusted\np-value", low = "red", high = "blue") +
+    theme(axis.title = element_text(size = 14), legend.title = element_text(size = 14),
+    axis.text.y  = element_text(hjust = 1, size = 12),
+    legend.text = element_text(size = 14)
+  ) +
+  # Wrap text for the y-axis labels (GO terms)
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 60))
+
+ggsave(paste0("Go_Terms/GO Enrichment (BP) pfkfb3_all_selected.png"), plot = select_plot, width = 10, height = 8, units = "in")
+
+
+select_GO_pfkfb3_up <- c(
+  "GO:0006261",
+  "GO:0000727",
+  "GO:0006268",
+  "GO:0006270",
+  "GO:0032508",
+  "GO:0006310",
+  "GO:0051321",
+  "GO:0030510",
+  "GO:0010595",
+  "GO:0090068",
+  "GO:0051446",
+  "GO:0090288",
+  "GO:0007127",
+  "GO:0001525",
+  "GO:0010469",
+  "GO:0070192",
+  "GO:0045787",
+  "GO:0030509",
+  "GO:0090329",
+  "GO:0072089",
+  "GO:0043410",
+  "GO:0071772",
+  "GO:0071773",
+  "GO:1902751",
+  "GO:0007129",
+  "GO:0051785",
+  "GO:0048145",
+  "GO:0030174",
+  "GO:0030335",
+  "GO:0038001"
+)
+
+
+GO_U251_pfkfb3_kd_up@result <- GO_U251_pfkfb3_kd_up@result[
+  GO_U251_pfkfb3_kd_up@result$ID %in% select_GO_pfkfb3_up, ]
+
+view(GO_U251_pfkfb3_kd_up)
+
+
+select_plot <- dotplot(GO_U251_pfkfb3_kd_up, showCategory = 26, label_format= 45) +
+    labs(title = paste("GO Enrichment (BP) pfkfb3 up"), size = "count") +
+    scale_fill_continuous(name = "Adjusted\np-value", low = "red", high = "blue") +
+    theme(axis.title = element_text(size = 14), legend.title = element_text(size = 14),
+    axis.text.y  = element_text(hjust = 1, size = 12),
+    legend.text = element_text(size = 14)
+  ) +
+  # Wrap text for the y-axis labels (GO terms)
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 60))
+
+ggsave(paste0("Go_Terms/GO Enrichment (BP) pfkfb3_up_selected.png"), plot = select_plot, width = 10, height = 8, units = "in")
+
+
+select_GO_pfkfb3_down <- c(
+  "GO:0001525",
+  "GO:0045765",
+  "GO:0032922",
+  "GO:0032496",
+  "GO:0002544",
+  "GO:1904428",
+  "GO:0001937",
+  "GO:0034275",
+  "GO:0034276",
+  "GO:0034346"
+)
+
+
+GO_U251_pfkfb3_kd_down@result <- GO_U251_pfkfb3_kd_down@result[
+  GO_U251_pfkfb3_kd_down@result$ID %in% select_GO_pfkfb3_down, ]
+
+view(GO_U251_pfkfb3_kd_down)
+
+
+select_plot <- dotplot(GO_U251_pfkfb3_kd_down, showCategory = 26, label_format= 45) +
+    labs(title = paste("GO Enrichment (BP) pfkfb3 down"), size = "count") +
+    scale_fill_continuous(name = "Adjusted\np-value", low = "red", high = "blue") +
+    theme(axis.title = element_text(size = 14), legend.title = element_text(size = 14),
+    axis.text.y  = element_text(hjust = 1, size = 12),
+    legend.text = element_text(size = 14)
+  ) +
+  # Wrap text for the y-axis labels (GO terms)
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 60))
+
+ggsave(paste0("Go_Terms/GO Enrichment (BP) pfkfb3_down_selected.png"), plot = select_plot, width = 10, height = 8, units = "in")
+
+
+
+# pfk1m
+
+select_GO_pfk1m_all <- c(
+  "GO:0001525",
+  "GO:0030198",
+  "GO:0043062",
+  "GO:0070371",
+  "GO:0070372",
+  "GO:0043410",
+  "GO:0043068",
+  "GO:0030335",
+  "GO:1902895",
+  "GO:0051385",
+  "GO:0007162",
+  "GO:1901655",
+  "GO:0090287",
+  "GO:0031589",
+  "GO:2000630",
+  "GO:0050920",
+  "GO:0032496",
+  "GO:1904045",
+  "GO:0045765",
+  "GO:0071389",
+  "GO:0071356",
+  "GO:1901654",
+  "GO:0045446",
+  "GO:0090092",
+  "GO:0022617",
+  "GO:0034612",
+  "GO:0014074",
+  "GO:0007229",
+  "GO:0009611",
+  "GO:0033627",
+  "GO:0010810",
+  "GO:0051897",
+  "GO:0071222",
+  "GO:0010447",
+  "GO:0055093",
+  "GO:1904044",
+  "GO:0030510",
+  "GO:0090100",
+  "GO:0007178",
+  "GO:0043280",
+  "GO:0043434",
+  "GO:0141091",
+  "GO:0001886",
+  "GO:0070482",
+  "GO:0071635",
+  "GO:2001225",
+  "GO:0032890",
+  "GO:0097164",
+  "GO:1903034",
+  "GO:0033273",
+  "GO:0052547",
+  "GO:0071216",
+  "GO:0038130",
+  "GO:2000146",
+  "GO:0051591",
+  "GO:1900025",
+  "GO:0018108",
+  "GO:0016053",
+  "GO:0018212",
+  "GO:0030856",
+  "GO:0120254",
+  "GO:0032570",
+  "GO:0072577",
+  "GO:0061042",
+  "GO:0110096",
+  "GO:0033559",
+  "GO:0045785",
+  "GO:0006534",
+  "GO:0042447",
+  "GO:0071468",
+  "GO:0003032",
+  "GO:0009308",
+  "GO:0042542",
+  "GO:0071560",
+  "GO:0072089",
+  "GO:0045429",
+  "GO:0051896",
+  "GO:0055078"
+)
+
+GO_U251_pfk1m_kd_all@result <- GO_U251_pfk1m_kd_all@result[
+  GO_U251_pfk1m_kd_all@result$ID %in% select_GO_pfk1m_all, ]
+
+view(GO_U251_pfk1m_kd_all)
+
+
+select_plot <- dotplot(GO_U251_pfk1m_kd_all, showCategory = 26, label_format= 45) +
+    labs(title = paste("GO Enrichment (BP) pfk1m all"), size = "count") +
+    scale_fill_continuous(name = "Adjusted\np-value", low = "red", high = "blue") +
+    theme(axis.title = element_text(size = 14), legend.title = element_text(size = 14),
+    axis.text.y  = element_text(hjust = 1, size = 12),
+    legend.text = element_text(size = 14)
+  ) +
+  # Wrap text for the y-axis labels (GO terms)
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 60))
+
+ggsave(paste0("Go_Terms/GO Enrichment (BP) pfk1m_all_selected.png"), plot = select_plot, width = 10, height = 8, units = "in")
+
+
+select_GO_pfk1m_up <- c(
+  "GO:0030198",
+  "GO:0043062",
+  "GO:0030335",
+  "GO:0031589",
+  "GO:0010447",
+  "GO:0019835",
+  "GO:0043410",
+  "GO:0070372",
+  "GO:0070371",
+  "GO:0033627",
+  "GO:0010810",
+  "GO:00305q10",
+  "GO:0051897",
+  "GO:0001525",
+  "GO:1904045",
+  "GO:0007162",
+  "GO:0043068",
+  "GO:0036314",
+  "GO:0071384",
+  "GO:0055093",
+  "GO:0071468",
+  "GO:0007229",
+  "GO:1901655",
+  "GO:0003032",
+  "GO:0090287"
+)
+
+
+GO_U251_pfk1m_kd_up@result <- GO_U251_pfk1m_kd_up@result[
+  GO_U251_pfk1m_kd_up@result$ID %in% select_GO_pfk1m_up, ]
+
+view(GO_U251_pfk1m_kd_up)
+
+
+select_plot <- dotplot(GO_U251_pfk1m_kd_up, showCategory = 26, label_format= 45) +
+    labs(title = paste("GO Enrichment (BP) pfk1m up"), size = "count") +
+    scale_fill_continuous(name = "Adjusted\np-value", low = "red", high = "blue") +
+    theme(axis.title = element_text(size = 14), legend.title = element_text(size = 14),
+    axis.text.y  = element_text(hjust = 1, size = 12),
+    legend.text = element_text(size = 14)
+  ) +
+  # Wrap text for the y-axis labels (GO terms)
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 60))
+
+ggsave(paste0("Go_Terms/GO Enrichment (BP) pfk1m_up_selected.png"), plot = select_plot, width = 10, height = 8, units = "in")
+
+
+select_GO_pfk1m_down <- c(
+  "GO:0071222",
+  "GO:0032496",
+  "GO:0001525",
+  "GO:0150077",
+  "GO:0038130",
+  "GO:0061888",
+  "GO:0051385",
+  "GO:1902895",
+  "GO:0070555",
+  "GO:0070098",
+  "GO:0010817",
+  "GO:0050673",
+  "GO:0030856",
+  "GO:0032620",
+  "GO:0032660",
+  "GO:0007200",
+  "GO:0009611",
+  "GO:0061614",
+  "GO:0032740",
+  "GO:0045765",
+  "GO:0042445",
+  "GO:0022617",
+  "GO:0001666",
+  "GO:0070371",
+  "GO:0141091",
+  "GO:0051412",
+  "GO:0070482",
+  "GO:0015828",
+  "GO:2000211",
+  "GO:0018108",
+  "GO:1904892",
+  "GO:0018212",
+  "GO:1901654",
+  "GO:0000101",
+  "GO:1903034",
+  "GO:0010955"
+)
+
+
+GO_U251_pfk1m_kd_down@result <- GO_U251_pfk1m_kd_down@result[
+  GO_U251_pfk1m_kd_down@result$ID %in% select_GO_pfk1m_down, ]
+
+view(GO_U251_pfk1m_kd_down)
+
+
+select_plot <- dotplot(GO_U251_pfk1m_kd_down, showCategory = 26, label_format= 45) +
+    labs(title = paste("GO Enrichment (BP) pfk1m down"), size = "count") +
+    scale_fill_continuous(name = "Adjusted\np-value", low = "red", high = "blue") +
+    theme(axis.title = element_text(size = 14), legend.title = element_text(size = 14),
+    axis.text.y  = element_text(hjust = 1, size = 12),
+    legend.text = element_text(size = 14)
+  ) +
+  # Wrap text for the y-axis labels (GO terms)
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 60))
+
+ggsave(paste0("Go_Terms/GO Enrichment (BP) pfk1m_down_selected.png"), plot = select_plot, width = 10, height = 8, units = "in")
+
+# pfk1l
+
+select_GO_pfk1l_all <- c(
+  "GO:0030198",
+  "GO:0043062",
+  "GO:0001525",
+  "GO:0031589",
+  "GO:0043410",
+  "GO:0030335",
+  "GO:0070371",
+  "GO:0009611",
+  "GO:0010810",
+  "GO:0070372",
+  "GO:0071356",
+  "GO:0033627",
+  "GO:0051897",
+  "GO:0034329",
+  "GO:0007162",
+  "GO:0043491",
+  "GO:1902895",
+  "GO:1903053",
+  "GO:2000630",
+  "GO:0051017",
+  "GO:0061572",
+  "GO:0045765",
+  "GO:0034612",
+  "GO:1901890",
+  "GO:0051896",
+  "GO:0030336",
+  "GO:0045785",
+  "GO:0014074",
+  "GO:0007229",
+  "GO:0007189",
+  "GO:0060395",
+  "GO:0048545",
+  "GO:0090287",
+  "GO:0032970",
+  "GO:0071216",
+  "GO:0071222",
+  "GO:0007219",
+  "GO:0010955",
+  "GO:0034762",
+  "GO:1903035",
+  "GO:0010817",
+  "GO:1903318",
+  "GO:0043542",
+  "GO:0015850",
+  "GO:0051591",
+  "GO:0022617",
+  "GO:0071634",
+  "GO:0090092",
+  "GO:0018212",
+  "GO:0044319",
+  "GO:0043068",
+  "GO:0070482",
+  "GO:0044089",
+  "GO:0061045",
+  "GO:0045926",
+  "GO:0018108",
+  "GO:0019722",
+  "GO:0141091",
+  "GO:0010447",
+  "GO:0043434",
+  "GO:0051336",
+  "GO:0051283",
+  "GO:1903317",
+  "GO:0045761",
+  "GO:0043281",
+  "GO:0001666",
+  "GO:0010717",
+  "GO:0030500",
+  "GO:0008593",
+  "GO:0032526",
+  "GO:0071636",
+  "GO:0000302",
+  "GO:0019805",
+  "GO:0071560",
+  "GO:0006979",
+  "GO:0032956",
+  "GO:0070542",
+  "GO:0046883",
+  "GO:0051954",
+  "GO:0050921",
+  "GO:0016055",
+  "GO:0036119",
+  "GO:0032368",
+  "GO:0072089",
+  "GO:0097191",
+  "GO:0006534",
+  "GO:0010718",
+  "GO:0023061",
+  "GO:0006022",
+  "GO:0010586",
+  "GO:0045859",
+  "GO:1905952",
+  "GO:0051056",
+  "GO:0032963",
+  "GO:1901654",
+  "GO:0030510",
+  "GO:0046942",
+  "GO:0009749",
+  "GO:0006569",
+  "GO:0006865",
+  "GO:2001236",
+  "GO:0030111",
+  "GO:0042326",
+  "GO:0060391",
+  "GO:2000352",
+  "GO:0048771",
+  "GO:0001818",
+  "GO:0051339",
+  "GO:0071347",
+  "GO:0071300",
+  "GO:0043954",
+  "GO:0050866",
+  "GO:0034446",
+  "GO:0050730",
+  "GO:0033622",
+  "GO:0009743",
+  "GO:0034354",
+  "GO:0046874",
+  "GO:0060244",
+  "GO:0071504",
+  "GO:0071295",
+  "GO:0007194",
+  "GO:0031280",
+  "GO:0036152",
+  "GO:0042430",
+  "GO:0051893",
+  "GO:0042327",
+  "GO:0019934",
+  "GO:0071772",
+  "GO:0071773"
+)
+
+GO_U251_pfk1l_kd_all@result <- GO_U251_pfk1l_kd_all@result[
+  GO_U251_pfk1l_kd_all@result$ID %in% select_GO_pfk1l_all, ]
+
+view(GO_U251_pfk1l_kd_all)
+
+
+select_plot <- dotplot(GO_U251_pfk1l_kd_all, showCategory = 26, label_format= 45) +
+    labs(title = paste("GO Enrichment (BP) pfk1l all"), size = "count") +
+    scale_fill_continuous(name = "Adjusted\np-value", low = "red", high = "blue") +
+    theme(axis.title = element_text(size = 14), legend.title = element_text(size = 14),
+    axis.text.y  = element_text(hjust = 1, size = 12),
+    legend.text = element_text(size = 14)
+  ) +
+  # Wrap text for the y-axis labels (GO terms)
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 60))
+
+ggsave(paste0("Go_Terms/GO Enrichment (BP) pfk1l_all_selected.png"), plot = select_plot, width = 10, height = 8, units = "in")
+
+
+select_GO_pfk1l_up <- c(
+  "GO:0031589",
+  "GO:0001525",
+  "GO:0030335",
+  "GO:0030198",
+  "GO:0043062",
+  "GO:0010810",
+  "GO:0070371",
+  "GO:0043410",
+  "GO:0043491",
+  "GO:0007162",
+  "GO:0070372",
+  "GO:0010447",
+  "GO:2000146",
+  "GO:0071356",
+  "GO:0051896",
+  "GO:0060390",
+  "GO:0009611",
+  "GO:0034612",
+  "GO:0043542",
+  "GO:0031960",
+  "GO:0043277",
+  "GO:0060391",
+  "GO:0007229",
+  "GO:0051017",
+  "GO:0033627",
+  "GO:1904045",
+  "GO:0061572",
+  "GO:0071295",
+  "GO:0050920",
+  "GO:0090288",
+  "GO:0043281",
+  "GO:0060395",
+  "GO:0034446",
+  "GO:0033622"
+)
+
+
+GO_U251_pfk1l_kd_up@result <- GO_U251_pfk1l_kd_up@result[
+  GO_U251_pfk1l_kd_up@result$ID %in% select_GO_pfk1l_up, ]
+
+view(GO_U251_pfk1l_kd_up)
+
+
+select_plot <- dotplot(GO_U251_pfk1l_kd_up, showCategory = 26, label_format= 45) +
+    labs(title = paste("GO Enrichment (BP) pfk1l up"), size = "count") +
+    scale_fill_continuous(name = "Adjusted\np-value", low = "red", high = "blue") +
+    theme(axis.title = element_text(size = 14), legend.title = element_text(size = 14),
+    axis.text.y  = element_text(hjust = 1, size = 12),
+    legend.text = element_text(size = 14)
+  ) +
+  # Wrap text for the y-axis labels (GO terms)
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 60))
+
+ggsave(paste0("Go_Terms/GO Enrichment (BP) pfk1l_up_selected.png"), plot = select_plot, width = 10, height = 8, units = "in")
+
+
+select_GO_pfk1l_down <- c(
+  "GO:0030198",
+  "GO:0043062",
+  "GO:0010817",
+  "GO:0043410",
+  "GO:0000302",
+  "GO:0071216",
+  "GO:0071222",
+  "GO:1902895",
+  "GO:2000630",
+  "GO:1990169",
+  "GO:0006979",
+  "GO:1905039",
+  "GO:0046883",
+  "GO:0071294",
+  "GO:0031667",
+  "GO:0045765",
+  "GO:0009914",
+  "GO:0019805",
+  "GO:0015740",
+  "GO:0042180",
+  "GO:0009611",
+  "GO:0022617",
+  "GO:0018108",
+  "GO:0007160",
+  "GO:0060326",
+  "GO:0034354",
+  "GO:0046874",
+  "GO:0007189",
+  "GO:0043043",
+  "GO:0044089",
+  "GO:0042593",
+  "GO:0034599",
+  "GO:0018212",
+  "GO:1901890",
+  "GO:0001819",
+  "GO:0032370",
+  "GO:0007219",
+  "GO:0046394",
+  "GO:0170039",
+  "GO:0034627",
+  "GO:0010586",
+  "GO:0030335",
+  "GO:0031345",
+  "GO:0045926",
+  "GO:0070371",
+  "GO:0042886",
+  "GO:0170033",
+  "GO:0098742",
+  "GO:1905954",
+  "GO:0032233",
+  "GO:0051782",
+  "GO:0061687",
+  "GO:0071107",
+  "GO:0006564",
+  "GO:0009749",
+  "GO:0033627",
+  "GO:1901605",
+  "GO:0034614",
+  "GO:2001237",
+  "GO:1903035",
+  "GO:0090287",
+  "GO:0043420",
+  "GO:0015728",
+  "GO:0034275",
+  "GO:0034276",
+  "GO:0051591",
+  "GO:0045785",
+  "GO:0006569",
+  "GO:0050731",
+  "GO:2000833",
+  "GO:0006865",
+  "GO:0031664",
+  "GO:0050730",
+  "GO:0006882",
+  "GO:1904892",
+  "GO:0042445",
+  "GO:0006568",
+  "GO:0046328"
+)
+
+
+GO_U251_pfk1l_kd_down@result <- GO_U251_pfk1l_kd_down@result[
+  GO_U251_pfk1l_kd_down@result$ID %in% select_GO_pfk1l_down, ]
+
+view(GO_U251_pfk1l_kd_down)
+
+
+select_plot <- dotplot(GO_U251_pfk1l_kd_down, showCategory = 26, label_format= 45) +
+    labs(title = paste("GO Enrichment (BP) pfk1l down"), size = "count") +
+    scale_fill_continuous(name = "Adjusted\np-value", low = "red", high = "blue") +
+    theme(axis.title = element_text(size = 14), legend.title = element_text(size = 14),
+    axis.text.y  = element_text(hjust = 1, size = 12),
+    legend.text = element_text(size = 14)
+  ) +
+  # Wrap text for the y-axis labels (GO terms)
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 60))
+
+ggsave(paste0("Go_Terms/GO Enrichment (BP) pfk1l_down_selected.png"), plot = select_plot, width = 10, height = 8, units = "in")
+
+
+
+```
+
+## KEGG Enrichment Analysis
+
+```{r KEGG_Pathway, eval=FALSE, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='asis', fig.width=6, fig.height=5}
+
+
+dir.create("KEGG_Pathway", showWarnings = FALSE)
+
+
+# Filter for significant genes (adjust the thresholds as needed)
+sig_genes_pfkfb3 <- res_pfkfb3 |>
+  dplyr::filter(padj < 0.05 & abs(log2FoldChange) > 1) |> pull(gene_id) # Adjust log2FC threshold as needed
+
+sig_genes_pfk1m <- res_pfk1m |>
+  dplyr::filter(padj < 0.05 & abs(log2FoldChange) > 1) |> pull(gene_id) # Adjust log2FC threshold as needed
+
+sig_genes_pfk1l <- res_pfk1l |>
+  dplyr::filter(padj < 0.05 & abs(log2FoldChange) > 1) |> pull(gene_id) # Adjust log2FC threshold as needed
+
+# Set up the connection to Ensembl
+ensembl <- useEnsembl(biomart ="ensembl", 
+                      dataset = "hsapiens_gene_ensembl",
+                      mirror = "us")
+
+# Convert Ensembl IDs or Gene Symbols to Entrez IDs
+entrez_genes_pfkfb3 <- getBM(
+  attributes = c("ensembl_gene_id", "entrezgene_id"),
+  filters = "ensembl_gene_id",  # Change this to "external_gene_name" if using gene symbols
+  values = sig_genes_pfkfb3,
+  mart = ensembl
+)
+
+entrez_genes_pfk1m <- getBM(
+  attributes = c("ensembl_gene_id", "entrezgene_id"),
+  filters = "ensembl_gene_id",  # Change this to "external_gene_name" if using gene symbols
+  values = sig_genes_pfk1m,
+  mart = ensembl
+)
+
+entrez_genes_pfk1l <- getBM(
+  attributes = c("ensembl_gene_id", "entrezgene_id"),
+  filters = "ensembl_gene_id",  # Change this to "external_gene_name" if using gene symbols
+  values = sig_genes_pfk1l,
+  mart = ensembl
+)
+
+# Extract the Entrez IDs
+entrez_ids_pfkfb3 <- na.omit(entrez_genes_pfkfb3$entrezgene_id)
+
+entrez_ids_pfk1m <- na.omit(entrez_genes_pfk1m$entrezgene_id)
+
+entrez_ids_pfk1l <- na.omit(entrez_genes_pfk1l$entrezgene_id)
+
+# Perform KEGG enrichment analysis
+kegg_results_pfkfb3 <- enrichKEGG(gene = entrez_ids_pfkfb3,
+                                  organism = "hsa",
+                                  pvalueCutoff = 0.05,
+                                  pAdjustMethod = "BH",
+                                  minGSSize = 10,
+                                  maxGSSize = 500,
+                                  qvalueCutoff = 0.2)  # 'hsa' for Homo sapiens
+
+kegg_results_pfk1m <- enrichKEGG(gene = entrez_ids_pfk1m,
+                                 organism = "hsa",
+                                  pvalueCutoff = 0.05,
+                                  pAdjustMethod = "BH",
+                                  minGSSize = 10,
+                                  maxGSSize = 500,
+                                  qvalueCutoff = 0.2)  # 'hsa' for Homo sapiens
+
+kegg_results_pfk1l <- enrichKEGG(gene = entrez_ids_pfk1l,
+                                 organism = "hsa",
+                                  pvalueCutoff = 0.05,
+                                  pAdjustMethod = "BH",
+                                  minGSSize = 10,
+                                  maxGSSize = 500,
+                                  qvalueCutoff = 0.2)  # 'hsa' for Homo sapiens
+
+kegg_barplot_pfkfb3 <- barplot(kegg_results_pfkfb3, showCategory = 25,  title = "KEGG Pathways")
+ggsave("KEGG_Pathway/kegg_pathways_pfkfb3.png", plot = kegg_barplot_pfkfb3, width = 10, height = 8, units = "in")
+
+select_kegg_ids_pfkfb3 <- c(
+  "hsa04010",
+  "hsa04218",
+  "hsa03030",
+  "hsa04072",
+  "hsa04115",
+  "hsa04151"
+)
+
+
+kegg_results_pfkfb3@result <- kegg_results_pfkfb3@result %>%
+  filter(ID %in% select_kegg_ids_pfkfb3) %>%
+  mutate(GeneRatioNumeric = sapply(strsplit(GeneRatio, "/"), function(x) as.numeric(x[1]) / as.numeric(x[2]))) %>%
+  arrange(desc(GeneRatioNumeric))
+
+kegg_results_pfkfb3@result$Description[grepl("signaling pathway", kegg_results_pfkfb3@result$Description)]
+
+kegg_results_pfkfb3@result$Description <- gsub(
+  pattern = "AGE-RAGE signaling pathway in diabetic\ncomplications",
+  replacement = "AGE-RAGE signaling pathway",
+  x = kegg_results_pfkfb3@result$Description
+)
+
+kegg_results_pfkfb3@result$Description[grepl("tyrosine kinase", kegg_results_pfkfb3@result$Description)]
+
+kegg_results_pfkfb3@result$Description <- gsub(
+  pattern = "EGFR tyrosine kinase inhibitor\nresistance",
+  replacement = "EGFR TKI resistance",
+  x = kegg_results_pfkfb3@result$Description
+)
+kegg_results_pfkfb3@result$Description[grepl("PD-1", kegg_results_pfkfb3@result$Description)]
+
+kegg_results_pfkfb3@result$Description <- gsub(
+  pattern = "PD-L1 expression and PD-1 checkpoint\npathway in cancer",
+  replacement = "PD-1/PD-L1 Immune Checkpoint in Cancer",
+  x = kegg_results_pfkfb3@result$Description
+)
+
+
+view(kegg_results_pfkfb3)
+
+
+
+kegg_barplot_selected_pfkfb3 <- barplot(kegg_results_pfkfb3, showCategory = 25,  title = "Selected KEGG Pathways PFKFB3")
+
+ggsave("KEGG_Pathway/kegg_pathways_selected_pfkfb3.png", plot = kegg_barplot_selected_pfkfb3, width = 10, height = 8, units = "in")
+
+
+kegg_barplot_pfk1m <- barplot(kegg_results_pfk1m, showCategory = 25,  title = "KEGG Pathways")
+ggsave("KEGG_Pathway/kegg_pathways_pfk1m.png", plot = kegg_barplot_pfk1m, width = 10, height = 8, units = "in")
+
+select_kegg_ids_pfk1m <- c(
+  "hsa04512",
+  "hsa04933",
+  "hsa04151",
+  "hsa04668",
+  "hsa04928",
+  "hsa04510",
+  "hsa04010",
+  "hsa04820",
+  "hsa04657"
+)
+
+kegg_results_pfk1m@result <- kegg_results_pfk1m@result %>%
+  filter(ID %in% select_kegg_ids_pfk1m) %>%
+  mutate(GeneRatioNumeric = sapply(strsplit(GeneRatio, "/"), function(x) as.numeric(x[1]) / as.numeric(x[2]))) %>%
+  arrange(desc(GeneRatioNumeric))
+
+kegg_barplot_selected_pfk1m <- barplot(kegg_results_pfk1m, showCategory = 25,  title = "Selected KEGG Pathways PFK1m")
+
+ggsave("KEGG_Pathway/kegg_pathways_selected_pfk1m.png", plot = kegg_barplot_selected_pfk1m, width = 10, height = 8, units = "in")
+
+
+select_kegg_ids_pfk1l <- c(
+  "hsa04820",
+  "hsa04510",
+  "hsa04512",
+  "hsa04010",
+  "hsa04933",
+  "hsa04151",
+  "hsa04668",
+  "hsa04015",
+  "hsa04310",
+  "hsa04020",
+  "hsa04014",
+  "hsa04390",
+  "hsa04072",
+  "hsa04974",
+  "hsa01521",
+  "hsa00511",
+  "hsa04370",
+  "hsa05205",
+  "hsa05417"
+)
+
+kegg_results_pfk1l@result <- kegg_results_pfk1l@result %>%
+  filter(ID %in% select_kegg_ids_pfk1l) %>%
+  mutate(
+    GeneRatioNumeric = sapply(strsplit(GeneRatio, "/"), function(x) as.numeric(x[1]) / as.numeric(x[2]))) %>%
+  arrange(desc(GeneRatioNumeric))
+
+kegg_results_pfk1l@result$Description <- gsub(
+  pattern = "Chemical carcinogenesis - reactive\noxygen species",
+  replacement = "Chem. Carcinogenesis: ROS",
+  x = kegg_results_pfk1l@result$Description
+)
+view(kegg_results_pfk1l)
+
+
+kegg_barplot_selected_pfk1l <- barplot(kegg_results_pfk1l, showCategory = 25,  title = "Selected KEGG Pathways PFK1l")
+
+ggsave("KEGG_Pathway/kegg_pathways_selected_pfk1l.png", plot = kegg_barplot_selected_pfk1l, width = 10, height = 8, units = "in")
+
+kegg_barplot_pfk1l <- barplot(kegg_results_pfk1l, showCategory = 25,  title = "KEGG Pathways")
+ggsave("KEGG_Pathway/kegg_pathways_pfk1l.png", plot = kegg_barplot_pfk1l, width = 10, height = 8, units = "in")
+
+
+
+# Save the KEGG results as CSV
+
+kegg_results_pfkfb3_df <- data.frame(kegg_results_pfkfb3)
+kegg_results_pfk1m_df <- data.frame(kegg_results_pfk1m)
+kegg_results_pfk1l_df <- data.frame(kegg_results_pfk1l)
+
+
+
+write.csv(kegg_results_pfkfb3_df, 
+          file = "KEGG_Pathway/kegg_results_U251_pfkfb3_kd_vs_scr.csv",  # Specify the desired file name
+          row.names = FALSE)
+
+write.csv(kegg_results_pfk1m_df, 
+          file = "KEGG_Pathway/kegg_results_U251_pfk1m_kd_vs_scr.csv",  # Specify the desired file name
+          row.names = FALSE)
+
+write.csv(kegg_results_pfk1l_df, 
+          file = "KEGG_Pathway/kegg_results_U251_pfk1l_kd_vs_scr.csv",  # Specify the desired file name
+          row.names = FALSE)
+```
+
+### KEGG for upregulated and downregulated genes in each condition
+```{r}
+
+# Parameters
+lfcThreshold <- log2(2)
+alpha <- 0.05
+expLevel <- 50
+conditions <- c("U251_pfkfb3_kd", "U251_pfk1m_kd", "U251_pfk1l_kd")
+
+
+
+# Function to perform KEGG enrichment
+run_kegg <- function(entrez_ids, tag, test) {
+  if (length(entrez_ids) > 0) {
+    kegg <- enrichKEGG(gene = entrez_ids,
+                       organism = "hsa",
+                       pvalueCutoff = 0.05,
+                       pAdjustMethod = "BH",
+                       minGSSize = 10,
+                       maxGSSize = 500,
+                       qvalueCutoff = 0.2)
+    
+    if (!is.null(kegg) && nrow(as.data.frame(kegg)) > 0) {
+      write.csv(as.data.frame(kegg), paste0("KEGG_Pathway/", test, "_", tag, "_KEGG.csv"), row.names = FALSE)
+      p <- dotplot(kegg, showCategory = 20) + ggtitle(paste(test, tag, "KEGG Pathway Enrichment"))
+      ggsave(paste0("KEGG_Pathway/", test, "_", tag, "_KEGG.png"), plot = p, width = 10, height = 8)
+    }
+  }
+}
+
+# Main loop
+for (test in conditions) {
+  ctrl <- "U251_scr"
+  
+  res <- results(dds, contrast = c("conditions", test, ctrl), alpha = alpha) |>
+    as.data.frame() |>
+    rownames_to_column("gene_id") |>
+    na.omit() |>
+    dplyr::filter(padj < alpha, abs(log2FoldChange) > lfcThreshold, baseMean > expLevel) |>
+    dplyr::arrange(padj)
+  
+  # Up and down gene IDs
+  up_genes <- res |> filter(log2FoldChange > lfcThreshold) |> pull(gene_id)
+  down_genes <- res |> filter(log2FoldChange < -lfcThreshold) |> pull(gene_id)
+
+  # Convert to Entrez IDs
+  up_entrez <- getBM(attributes = c("ensembl_gene_id", "entrezgene_id"), filters = "ensembl_gene_id", values = up_genes, mart = ensembl) |> na.omit()
+  down_entrez <- getBM(attributes = c("ensembl_gene_id", "entrezgene_id"), filters = "ensembl_gene_id", values = down_genes, mart = ensembl) |> na.omit()
+
+  # Run KEGG enrichment
+  run_kegg(up_entrez$entrezgene_id, "up", test)
+  run_kegg(down_entrez$entrezgene_id, "down", test)
+}
+
+
+```
+
+
+```{r KEGG_Pathway_Plot, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='asis', fig.width=6, fig.height=5}
+#Plot KEGG Pathways
+
+kegg_results_pfkfb3_df <- read.csv("kegg_results_U251_pfkfb3_kd_vs_scr.csv")
+cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>KEGG Enrichment Results for U251_pfkfb3_kd</h4>"))
+DT::datatable(kegg_results_pfkfb3_df, options = list(scrollX = TRUE, pageLength = 10), caption = "GO Enrichment terms: U251_pfkfb3_kd vs scr")
+cat(paste0("<img src='kegg_pathways_pfkfb3.png' width='600'>"))
+
+kegg_results_pfk1m_df <- read.csv("kegg_results_U251_pfk1m_kd_vs_scr.csv")
+cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>KEGG Enrichment Results for U251_pfk1m_kd</h4>"))
+DT::datatable(kegg_results_pfk1m_df, options = list(scrollX = TRUE, pageLength = 10), caption = "GO Enrichment terms: U251_pfk1m_kd vs scr")
+cat(paste0("<img src='kegg_pathways_pfk1m.png' width='600'>"))
+
+kegg_results_pfk1l_df <- read.csv("kegg_results_U251_pfk1l_kd_vs_scr.csv")
+cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>KEGG Enrichment Results for U251_pfk1l_kd</h4>"))
+DT::datatable(kegg_results_pfk1l_df, options = list(scrollX = TRUE, pageLength = 10), caption = "GO Enrichment terms: U251_pfk1l_kd vs scr")
+cat(paste0("<img src='kegg_pathways_pfk1l.png' width='600'>"))
+
+```
+
+
+```{r KEGG_Pathway_filtering, eval=FALSE, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='hide', fig.width=6, fig.height=5}
+# Filter for metabolism-related pathways (you can adjust based on your needs)
+metabolism_pathways_pfkfb3 <- kegg_results_pfkfb3[grep("metabolism", kegg_results_pfkfb3$Description, ignore.case = TRUE), ]
+
+# Plot the enriched pathways
+p1 <- ggplot(metabolism_pathways_pfkfb3, aes(y = reorder(Description, Count), x = Count, fill = p.adjust)) +
+  geom_bar(stat = "identity") +
+  scale_fill_gradient(low = "red", high = "blue", name = "padj") +  # Color gradient for padj
+  labs(title = "KEGG Metabolism Pathways Enrichment",
+       y = "",
+       x = "Gene Count") +
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),  # Increase title size
+    axis.title.y = element_text(size = 14),               # Increase y-axis title size
+    axis.title.x = element_text(size = 14),               # Increase x-axis title size
+    axis.text.y = element_text(size = 13),                # Increase y-axis text size
+    axis.text.x = element_text(size = 13)                 # Increase x-axis text size
+  )
+p1
+
+
+
+# Assuming you want to visualize a specific pathway (replace with your pathway ID)
+#pathway_id <- "hsa04218"  # Example for Metabolism
+
+# Generate pathway visualization
+#pathview(gene.data = sig_genes_pfkfb3, 
+         #pathway.id = pathway_id, 
+         #species = "hsa", 
+         #out.suffix = "pfkfb3_kd_vs_scr", 
+         #kegg.native = TRUE)
+
+
+
+```
+
+## Reactome Enrichment Analysis
+
+```{r Reactome, eval=FALSE, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='asis', fig.width=6, fig.height=5}
+# Assuming you have already filtered significant genes as in the previous step
+# For each of the conditions (pfkfb3, pfk1m, pfk1l)
+
+# Reactome enrichment analysis for each set of significant genes
+reactome_results_pfkfb3 <- enrichPathway(gene = entrez_ids_pfkfb3, organism = "human", pvalueCutoff = 0.05)  # 'human' for Homo sapiens
+
+reactome_results_pfk1m <- enrichPathway(gene = entrez_ids_pfk1m, organism = "human", pvalueCutoff = 0.05)  # 'human' for Homo sapiens
+
+reactome_results_pfk1l <- enrichPathway(gene = entrez_ids_pfk1l, organism = "human", pvalueCutoff = 0.05)  # 'human' for Homo sapiens
+
+# Save the Reactome results as CSV files
+reactome_results_pfkfb3_df <- data.frame(reactome_results_pfkfb3)
+reactome_results_pfk1m_df <- data.frame(reactome_results_pfk1m)
+reactome_results_pfk1l_df <- data.frame(reactome_results_pfk1l)
+
+# Write the Reactome results to CSV files for each condition
+write.csv(reactome_results_pfkfb3_df, 
+          file = "reactome_results_U251_pfkfb3_kd_vs_scr.csv",  # Specify the desired file name
+          row.names = FALSE)
+
+write.csv(reactome_results_pfk1m_df, 
+          file = "reactome_results_U251_pfk1m_kd_vs_scr.csv",  # Specify the desired file name
+          row.names = FALSE)
+
+write.csv(reactome_results_pfk1l_df, 
+          file = "reactome_results_U251_pfk1l_kd_vs_scr.csv",  # Specify the desired file name
+          row.names = FALSE)
+
+reactome_barplot_pfkfb3 <- barplot(reactome_results_pfkfb3, showCategory = 10, title = "Reactome Pathways")
+ggsave("reactome_pathways_pfkfb3.png", plot = reactome_barplot_pfkfb3, width = 10, height = 8, units = "in")
+
+reactome_barplot_pfk1m <- barplot(reactome_results_pfk1m, showCategory = 10, title = "Reactome Pathways")
+ggsave("reactome_pathways_pfk1m.png", plot = reactome_barplot_pfk1m, width = 10, height = 8, units = "in")
+
+reactome_barplot_pfk1l <- barplot(reactome_results_pfk1l, showCategory = 10, title = "Reactome Pathways")
+ggsave("reactome_pathways_pfk1l.png", plot = reactome_barplot_pfk1l, width = 10, height = 8, units = "in")
+
+
+```
+
+
+```{r Show_Reactome, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='asis', fig.width=6, fig.height=5}
+reactome_results_pfkfb3_df <- read.csv("reactome_results_U251_pfkfb3_kd_vs_scr.csv")
+
+reactome_results_pfk1m_df <- read.csv("reactome_results_U251_pfk1m_kd_vs_scr.csv")
+
+reactome_results_pfk1l_df <- read.csv("reactome_results_U251_pfk1l_kd_vs_scr.csv")
+
+
+
+# Plotting Reactome Pathways using barplot
+cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>Reactome Enrichment Results for U251_pfkfb3_kd</h4>"))
+DT::datatable(reactome_results_pfkfb3_df, options = list(scrollX = TRUE, pageLength = 10), caption = "Reactome Enrichment terms: U251_pfkfb3_kd vs scr")
+cat(paste0("<img src='reactome_pathways_pfkfb3.png' width='600'>"))
+
+cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>Reactome Enrichment Results for U251_pfk1m_kd</h4>"))
+DT::datatable(reactome_results_pfk1m_df, options = list(scrollX = TRUE, pageLength = 10), caption = "Reactome Enrichment terms: U251_pfk1m_kd vs scr")
+cat(paste0("<img src='reactome_pathways_pfk1m.png' width='600'>"))
+
+cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>Reactome Enrichment Results for U251_pfk1l_kd</h4>"))
+DT::datatable(reactome_results_pfk1l_df, options = list(scrollX = TRUE, pageLength = 10), caption = "Reactome Enrichment terms: U251_pfk1l_kd vs scr")
+cat(paste0("<img src='reactome_pathways_pfk1l.png' width='600'>"))
+
+
+```
+
+
+
+```{r glycolysis_pathway, eval=FALSE}
+### Get Glycolysis Pathway Genes
+
+vsd <- vst(dds)  # Variance stabilizing transformation
+expression_data <- assay(vsd)
+
+# Get glycolysis pathway genes
+glycolysis_genes <- keggGet("hsa00010")[[1]]$GENE
+
+gene_symbols_glycolysis <- gsub("^(\\w+);.*", "\\1", glycolysis_genes)  # Capture group to extract the gene symbol before ";"
+
+gene_symbols_glycolysis <- gene_symbols_glycolysis[gene_symbols_glycolysis != glycolysis_genes]
+
+
+
+
+row_names <- rownames(expression_data)
+
+print(head(row_names))
+
+
+gene_names <- getBM(attributes = c("ensembl_gene_id", "hgnc_symbol"),
+                    filters = "ensembl_gene_id",
+                    values = row_names,
+                    mart = ensembl)
+
+# Create a mapping of Ensembl IDs to Gene Symbols
+mapping <- setNames(gene_names$hgnc_symbol, gene_names$ensembl_gene_id)
+
+# Find matching genes in your expression data
+# convert your gene symbols to their corresponding Ensembl IDs
+matching_genes <- names(mapping[mapping %in% gene_symbols_glycolysis])
+
+# Subset the expression data for matched genes
+metabolism_expression <- expression_data[matching_genes, , drop = FALSE]
+
+# Set row names to the gene symbols for better visualization
+rownames(metabolism_expression) <- mapping[matching_genes]
+
+# Change the names of the columns into the right conditions
+print(colnames(metabolism_expression))
+new_colnames <- c("U251_scr_1", "U251_scr_2", "U251_scr_3", "U251_pfkfb3_kd_1", "U251_pfkfb3_kd_2", "U251_pfkfb3_kd_3", "U251_pfk1l_kd_1", "U251_pfk1l_kd_2", "U251_pfk1l_kd_3", "U251_pfk1m_kd_1", "U251_pfk1m_kd_2", "U251_pfk1m_kd_3")
+
+colnames(metabolism_expression) <- new_colnames
+print(colnames(metabolism_expression))
+
+# Put the needed conditions
+conditions_to_keep <- c("U251_scr_1", "U251_scr_2", "U251_scr_3", "U251_pfkfb3_kd_1", "U251_pfkfb3_kd_2", "U251_pfkfb3_kd_3")
+
+conditions_to_keep <- c("U251_scr_1", "U251_scr_2", "U251_scr_3", "U251_pfk1m_kd_1", "U251_pfk1m_kd_2", "U251_pfk1m_kd_3")
+
+conditions_to_keep <- c("U251_scr_1", "U251_scr_2", "U251_scr_3", "U251_pfk1l_kd_1", "U251_pfk1l_kd_2", "U251_pfk1l_kd_3")
+
+current_colnames <- colnames(metabolism_expression)
+filtered_metabolism_expression <- metabolism_expression[, current_colnames %in% conditions_to_keep, drop = FALSE]
+scr_columns <- colnames(filtered_metabolism_expression)[grepl("U251_scr", colnames(filtered_metabolism_expression))]
+pfkfb3_kd_columns <- colnames(filtered_metabolism_expression)[grepl("U251_pfkfb3_kd", colnames(filtered_metabolism_expression))]
+
+# Combine the column names of both conditions (U251_scr and U251_pfkfb3_kd)
+all_columns <- c(scr_columns, pfkfb3_kd_columns)
+
+# Step 1: Order columns (samples) by the mean expression of U251_scr
+mean_expression_scr <- colMeans(filtered_metabolism_expression[, scr_columns])
+ordered_samples <- order(mean_expression_scr, decreasing = TRUE)
+
+# Reorder the columns based on the expression levels in U251_scr (highest to lowest)
+ordered_metabolism_expression <- filtered_metabolism_expression[, all_columns]
+
+
+# Step 2: Optionally, you can also order rows (genes) by expression in U251_scr condition
+ordered_rows <- order(rowMeans(ordered_metabolism_expression[, scr_columns]), decreasing = TRUE)
+ordered_metabolism_expression <- ordered_metabolism_expression[ordered_rows, ]
+
+
+
+# Create the heatmap
+p1 <- pheatmap(ordered_metabolism_expression, 
+         color = colorRampPalette(c("blue", "white", "red"))(50), 
+         scale = "row", 
+         main = "Glycolysis Pathway Gene Expression",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE)
+
+
+  ggsave(filename = "Glycolysis_heatmap_PFK1L.png",
+         plot = p1)
+  
+```
+
+
+```{r Glycolysis_heatmap, eval=FALSE}
+##Glycolysis heatmap (the right one)
+
+# Perform DESeq2 analysis
+dds <- DESeq(dds)
+res <- results(dds, contrast = c("conditions", "U251_pfkfb3_kd", "U251_scr"))
+res_df <- as.data.frame(res) %>% na.omit() %>% rownames_to_column("gene_id")
+vsd <- vst(dds)  # Variance stabilizing transformation
+expression_data <- assay(vsd)
+
+# Order genes by log2FoldChange (or other metric like padj)
+resOrdered <- res %>%
+  as.data.frame() %>%
+  dplyr::arrange(desc(abs(log2FoldChange)))  # Ordering by absolute log2FoldChange
+
+# Get glycolysis pathway genes (from KEGG)
+glycolysis_genes <- keggGet("hsa00010")[[1]]$GENE
+
+# Extract the gene symbols (remove extra info)
+gene_symbols_glycolysis <- gsub("^(\\w+);.*", "\\1", glycolysis_genes)
+
+# Remove any extra Ensembl IDs that are not part of the glycolysis genes
+gene_symbols_glycolysis <- gene_symbols_glycolysis[gene_symbols_glycolysis != glycolysis_genes]
+
+# Use biomaRt to map glycolysis gene symbols (HGNC symbols) to Ensembl gene IDs
+glycolysis_ensembl <- getBM(attributes = c("hgnc_symbol", "ensembl_gene_id"),
+                             filters = "hgnc_symbol",
+                             values = gene_symbols_glycolysis,
+                             mart = ensembl)
+# Create a mapping from HGNC symbols to Ensembl gene IDs
+glycolysis_mapping <- setNames(glycolysis_ensembl$ensembl_gene_id, glycolysis_ensembl$hgnc_symbol)
+
+# Get Ensembl gene IDs from the results (res)
+ordered_genes <- rownames(resOrdered)
+
+# Extract the Ensembl gene IDs from the DESeq2 results and match them to the glycolysis genes
+matching_genes <- intersect(ordered_genes, glycolysis_mapping)
+
+# Subset the expression data for the matched glycolysis genes
+metabolism_expression <- expression_data[matching_genes, , drop = FALSE]
+
+# Find the common genes between the ordered_genes and metabolism_expression genes
+common_genes <- intersect(ordered_genes, rownames(metabolism_expression))
+
+# Subset the expression data for the common genes
+metabolism_expression_subset <- metabolism_expression[common_genes, , drop = FALSE]
+
+# Check the dimensions to confirm the subset
+dim(metabolism_expression_subset)
+
+# Ensure that ordered_genes is a subset of the available rows in metabolism_expression
+ordered_genes <- ordered_genes[ordered_genes %in% rownames(metabolism_expression_subset)]
+
+# Reorder rows based on log2FoldChange (or other metric)
+ordered_metabolism_expression <- metabolism_expression_subset[ordered_genes, ]
+
+
+# Change the names of the columns into the right conditions
+print(colnames(ordered_metabolism_expression))
+new_colnames <- c("U251_scr_1", "U251_scr_2", "U251_scr_3", "U251_pfkfb3_kd_1", "U251_pfkfb3_kd_2", "U251_pfkfb3_kd_3", "U251_pfk1l_kd_1", "U251_pfk1l_kd_2", "U251_pfk1l_kd_3", "U251_pfk1m_kd_1", "U251_pfk1m_kd_2", "U251_pfk1m_kd_3")
+
+colnames(ordered_metabolism_expression) <- new_colnames
+print(colnames(ordered_metabolism_expression))
+
+# Identify U251_scr columns and reorder them by their mean expression
+
+scr_columns <- colnames(ordered_metabolism_expression)[grepl("U251_scr", colnames(ordered_metabolism_expression))]
+mean_expression_scr <- rowMeans(ordered_metabolism_expression[, scr_columns])
+ordered_samples <- names(sort(mean_expression_scr, decreasing = TRUE))
+
+# Reorder columns based on the ordered samples (highest expression first)
+ordered_metabolism_expression <- ordered_metabolism_expression[ordered_samples, ]
+
+# Get Ensembl IDs for the matched genes (glycolysis genes)
+matching_genes <- rownames(ordered_metabolism_expression)
+
+# Use biomaRt to map Ensembl gene IDs to HGNC symbols (or gene symbols)
+gene_names <- getBM(attributes = c("ensembl_gene_id", "hgnc_symbol"),
+                    filters = "ensembl_gene_id",
+                    values = matching_genes,
+                    mart = ensembl)
+
+# Create a mapping from Ensembl gene IDs to Gene Symbols (HGNC symbols)
+mapping <- setNames(gene_names$hgnc_symbol, gene_names$ensembl_gene_id)
+
+# Update the row names of ordered_metabolism_expression to gene symbols
+rownames(ordered_metabolism_expression) <- mapping[matching_genes]
+
+# Verify that row names are gene symbols
+head(rownames(ordered_metabolism_expression))
+
+
+# Create the heatmap
+p1 <- pheatmap(ordered_metabolism_expression, 
+               color = colorRampPalette(c("blue", "white", "red"))(50), 
+               scale = "row", 
+               main = "Glycolysis Pathway Gene Expression",
+               cluster_rows = FALSE,  # Disable clustering of rows
+               cluster_cols = FALSE,  # Disable clustering of columns
+               show_rownames = TRUE,  # Show row names for better visibility
+               show_colnames = TRUE,  # Show column names for better visibility
+               fontsize_row = 10,  # Adjust the font size for row names (gene symbols)
+               fontsize_col = 10,  # Adjust the font size for column names (sample names)
+               width = 30,  # Adjust the width of the plot
+               height = 30)  # Adjust the height of the plot
+
+ggsave(filename = "glycolysis_heatmap.png", plot = p1, width = 12, height = 10, units = "in", dpi = 300)
+```
+
+
+
+```{r, eval=FALSE}
+## Gene Set Enrichment Analysis (old, for only one condition, i am looping in the next section)
+
+## *****downLoad the gmt files****###
+library(msigdbr)
+library(enrichplot)
+library(fgsea)
+library(biomaRt)
+
+
+# Load the gene sets for human
+msigdb <- msigdbr(species = "Homo sapiens", collection = "C2")  # Category C2 is for curated gene sets
+
+msigdb_H <- msigdbr(species = "Homo sapiens", category = "H")
+
+msigdb_C2_CPBIOCARTA <- msigdbr(
+  species = "Homo sapiens",
+  db_species = "HS",
+  collection = "C2",
+  subcollection = "CP:BIOCARTA"
+)
+
+print(msigdbr_collections())
+
+## focus on Hallmark gene sets, transcription factors in C3
+
+
+
+lfcThreshold <- log2(2)
+alpha <- 0.05
+expLevel <- 50
+
+ctrl_1 <- "U251_scr" 
+test_1 <- "U251_pfkfb3_kd" 
+
+ctrl_2 <- "U251_scr" 
+test_2 <- "U251_pfk1m_kd" 
+
+ctrl_3 <- "U251_scr" 
+test_3 <- "U251_pfk1l_kd"
+
+
+res_pfkfb3 <- results(dds, contrast = c("conditions", test_1, ctrl_1), 
+                      lfcThreshold = lfcThreshold, alpha = alpha) |> 
+  as.data.frame() |> 
+  rownames_to_column("gene_id") |> 
+  na.omit() |>
+  filter(baseMean >= expLevel) |>
+  filter(abs(log2FoldChange) >= lfcThreshold) |>
+  dplyr::arrange(desc(abs(log2FoldChange))) |> #Sort by absolute log2 fold change
+  left_join(annotations, by = "gene_id")
+
+
+res_pfkfb3 <- results(dds, contrast = c("conditions", test_1, ctrl_1), 
+                      lfcThreshold = lfcThreshold, alpha = alpha) |> 
+  as.data.frame() |> 
+  rownames_to_column("gene_id") |> 
+  na.omit() |>
+  filter(baseMean >= expLevel) |>
+  filter(abs(log2FoldChange) >= lfcThreshold) |>
+  dplyr::arrange(padj) |> #Sort by absolute log2 fold change
+  left_join(annotations, by = "gene_id")
+
+
+write.csv(res_pfkfb3, file = "results_pfkfb3.csv", row.names = FALSE)
+
+
+res_pfk1m <- results(dds, contrast = c("conditions", test_2, ctrl_2), 
+                     lfcThreshold = lfcThreshold, alpha = alpha) |> 
+  as.data.frame() |> 
+  rownames_to_column("gene_id") |>
+  na.omit() |> 
+  filter(baseMean >= expLevel) |>
+  filter(abs(log2FoldChange) >= lfcThreshold) |>
+  dplyr::arrange(padj) |>
+  left_join(annotations, by = "gene_id")
+
+write.csv(res_pfk1m, file = "results_pfk1m.csv", row.names = FALSE)
+
+
+res_pfk1l <- results(dds, contrast = c("conditions", test_3, ctrl_3), 
+                     lfcThreshold = lfcThreshold, alpha = alpha) |> 
+  as.data.frame() |> 
+  rownames_to_column("gene_id") |> 
+  dplyr::arrange(desc(abs(log2FoldChange))) |> 
+  na.omit() |> 
+  left_join(annotations, by = "gene_id")
+
+res_pfk1l <- results(dds, contrast = c("conditions", test_3, ctrl_3), 
+                     lfcThreshold = lfcThreshold, alpha = alpha) |> 
+  as.data.frame() |> 
+  rownames_to_column("gene_id") |>
+  na.omit() |> 
+  filter(baseMean >= expLevel) |>
+  filter(abs(log2FoldChange) >= lfcThreshold) |>
+  dplyr::arrange(padj) |>
+  left_join(annotations, by = "gene_id")
+
+write.csv(res_pfk1l, file = "results_pfk1l.csv", row.names = FALSE)
+
+
+
+# Create a ranked list (log2 fold change)
+ranked_genes_pfkfb3 <- res_pfkfb3$log2FoldChange
+names(ranked_genes_pfkfb3) <- res_pfkfb3$gene_id #contain ensembl IDs
+
+# Filter out genes with NA log2FoldChange or padj values
+ranked_genes_pfkfb3 <- ranked_genes_pfkfb3[!is.na(ranked_genes_pfkfb3)]
+# Sort the ranked list in decreasing order
+ranked_genes_pfkfb3 <- sort(ranked_genes_pfkfb3, decreasing = TRUE) 
+###******####
+
+gene_symbols_pfkfb3 <- mapIds(org.Hs.eg.db, 
+                              keys = names(ranked_genes_pfkfb3), 
+                              column = "SYMBOL", 
+                              keytype = "ENSEMBL", 
+                              multiVals = "first")
+
+valid_genes <- !is.na(gene_symbols_pfkfb3)
+ranked_genes_pfkfb3 <- ranked_genes_pfkfb3[valid_genes]
+ranked_genes_pfkfb3 <- sort(ranked_genes_pfkfb3, decreasing = TRUE) 
+gene_symbols_pfkfb3 <- gene_symbols_pfkfb3[valid_genes]
+
+# Now, use the gene symbols as names
+names(ranked_genes_pfkfb3) <- gene_symbols_pfkfb3
+
+
+duplicated_genes <- names(ranked_genes_pfkfb3)[duplicated(names(ranked_genes_pfkfb3))]
+print(duplicated_genes)
+
+# Remove duplicates from ranked_genes_pfkfb3
+ranked_genes_pfkfb3 <- ranked_genes_pfkfb3[!duplicated(names(ranked_genes_pfkfb3))]
+
+duplicated_genes_after <- names(ranked_genes_pfkfb3)[duplicated(names(ranked_genes_pfkfb3))]
+print(duplicated_genes_after)
+
+# Define TERM2GENE for the GSEA analysis
+TERM2GENE <- msigdb %>%
+  dplyr::select(gs_name, gene_symbol)  # Use gs_name as term and gene_symbol as gene
+
+# Run GSEA using gene symbols
+gsea_result_pfkfb3 <- GSEA(
+  ranked_genes_pfkfb3,
+  TERM2GENE = TERM2GENE,
+  pvalueCutoff = 0.05,  # Set significance threshold
+  minGSSize = 10,       # Minimum size of gene sets
+  maxGSSize = 500,      # Maximum size of gene sets
+  pAdjustMethod = "BH",
+  verbose = TRUE
+)
+
+# Check the GSEA results
+view(gsea_result_pfkfb3)
+
+# Clean up gene set names by removing the first word and underscore
+gsea_result_pfkfb3@result$ID  <- gsub("^[^_]+_", "", gsea_result_pfkfb3@result$ID)
+
+head(gsea_result_pfkfb3@result$ID)
+
+
+
+# Plot GSEA results
+p <- enrichplot::dotplot(gsea_result_pfkfb3, showCategory = 20)  # Top 10 enriched gene sets
+
+print(p)
+
+
+
+enrichplot::gseaplot(gsea_result_pfkfb3, geneSetID = "SARRIO_EPITHELIAL_MESENCHYMAL_TRANSITION_UP")
+
+
+
+enrichplot::gseaplot2(
+  gsea_result_pfkfb3,
+  geneSetID = "SARRIO_EPITHELIAL_MESENCHYMAL_TRANSITION_UP",
+  title = "",
+  color = "green",
+  base_size = 11,
+  rel_heights = c(1.5, 0.5, 1),
+  subplots = 1:3,
+  pvalue_table = FALSE,
+  ES_geom = "line"
+)
+
+#(gsea_result_pfkfb3, geneSetID = "SARRIO_EPITHELIAL_MESENCHYMAL_TRANSITION_DN")
+
+# Loop through gene set IDs and plot for each
+gsea_plots <- lapply(gene_set_ids, function(gene_set) {
+  enrichplot::gseaplot(gsea_result_pfkfb3, geneSetID = gene_set, title = paste("GSEA Plot for", gene_set))
+})
+
+print(gsea_plots)
+
+
+
+
+
+
+
+
+
+#******TRIAL BUT NOT WORKING**** # Correlating GSEA with Gene Expression Data # need to work on it
+# Example to examine genes in the enriched pathway
+enriched_genes_EMT <- gsea_result_pfkfb3@result$core_enrichment[gsea_result_pfkfb3@result$ID == "EPITHELIAL_MESENCHYMAL_TRANSITION_UP"]
+
+enriched_genes_EMT <- unlist(strsplit(enriched_genes, split = "/"))
+
+
+##TRIAL to combine 2 pathways in one plot#####
+
+library(enrichplot)
+
+library(gridExtra)
+
+gene_sets <- c("SARRIO_EPITHELIAL_MESENCHYMAL_TRANSITION_UP", "SARRIO_EPITHELIAL_MESENCHYMAL_TRANSITION_DN")
+
+
+
+```
+
+
+
+```{r GSEA analysis, eval=FALSE}
+
+## Gene Set Enrichment Analysis for all categories and conditions (still need to plot genes and specific pathways)
+
+# Define the conditions and categories you want to loop over
+conditions <- c("U251_pfkfb3_kd", "U251_pfk1m_kd", "U251_pfk1l_kd")
+categories <- c("C2", "H", "C6")  # Categories C2, H, and C6
+
+# Set up parameters
+lfcThreshold <- log2(1)
+alpha <- 0.05
+expLevel <- 50
+
+# Create an empty list to store the GSEA results
+gsea_results <- list()
+
+# Loop through the conditions and categories
+for (test in conditions) {
+  # Get DESeq2 results for each condition
+  res <- results(dds, contrast = c("conditions", test, "U251_scr"),
+                 lfcThreshold = lfcThreshold, alpha = alpha) |> 
+    as.data.frame() |> 
+    rownames_to_column("gene_id") |> 
+    dplyr::arrange(desc(abs(log2FoldChange))) |> 
+    na.omit() |> 
+    left_join(annotations, by = "gene_id")
+  
+  # Rank the genes by their log2 fold change
+  ranked_genes <- res$log2FoldChange
+  names(ranked_genes) <- res$gene_id  # use Ensembl IDs for now
+  # Filter out genes with NA log2FoldChange or padj values
+  ranked_genes <- ranked_genes[!is.na(ranked_genes)]
+  # Sort the ranked list in decreasing order
+  ranked_genes <- sort(ranked_genes, decreasing = TRUE) 
+  
+  # Map Ensembl IDs to Gene Symbols
+  gene_symbols <- mapIds(org.Hs.eg.db, keys = names(ranked_genes), column = "SYMBOL", keytype = "ENSEMBL", multiVals = "first")
+  
+  # Remove any NAs and keep only valid gene symbols
+  valid_genes <- !is.na(gene_symbols)
+  ranked_genes <- ranked_genes[valid_genes]
+  ranked_genes <- sort(ranked_genes, decreasing = TRUE)
+  gene_symbols <- gene_symbols[valid_genes]
+  
+  # Now, use the gene symbols as names
+  names(ranked_genes) <- gene_symbols
+  
+  duplicated_genes <- names(ranked_genes)[duplicated(names(ranked_genes))]
+  # Remove duplicates from ranked_genes_pfkfb3
+  ranked_genes <- ranked_genes[!duplicated(names(ranked_genes))]
+  
+  # Loop through each category (C2, H, C6)
+  for (category in categories) {
+    # Load the gene sets for the current category
+    msigdb <- msigdbr(species = "Homo sapiens", category = category)
+    
+    # Define TERM2GENE for the GSEA analysis
+    TERM2GENE <- msigdb %>%
+      dplyr::select(gs_name, gene_symbol)  # Use gs_name as term and gene_symbol as gene
+    
+    # Run GSEA using gene symbols
+    gsea_result <- GSEA(
+      ranked_genes,
+      TERM2GENE = TERM2GENE,
+      pvalueCutoff = 0.05,  # Set significance threshold
+      minGSSize = 10,       # Minimum size of gene sets
+      maxGSSize = 500,      # Maximum size of gene sets
+      pAdjustMethod = "BH",
+      verbose = TRUE
+    )
+    
+    # Save the results
+    gsea_results[[paste(test, category, sep = "_")]] <- gsea_result
+    
+    # Optionally, save the GSEA result as a CSV or plot (optional)
+    gsea_result_df <- as.data.frame(gsea_result@result)
+    write.csv(gsea_result_df, paste0("GSEA_", test, "_", category, ".csv"))
+    dotplot_gsea <- enrichplot::dotplot(gsea_result, showCategory = 20)  # Top 20 enriched gene sets
+    ggsave(paste0("dotplot_GSEA_", test, "_", category, ".png"), plot = dotplot_gsea, width = 10, height = 8, units = "in")
+  }
+}
+```
+## Gene Set Enrichment Analysis for U251_pfkfb3_kd
+
+```{r GSEA_PFKFB3, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='asis', fig.width=6, fig.height=5}
+# Display the table using DT::datatable
+cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GSEA Results for U251_pfkfb3_kd_C2</h4>"))
+DT::datatable(read.csv(paste0("GSEA_U251_pfkfb3_kd_C2.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+              caption = "GSEA Results for U251_pfkfb3_kd (C2)")
+
+cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GSEA Results for U251_pfkfb3_kd_H</h4>"))
+DT::datatable(read.csv(paste0("GSEA_U251_pfkfb3_kd_H.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+              caption = "GSEA Results for U251_pfkfb3_kd (H)")
+
+cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GSEA Results for U251_pfkfb3_kd_C6</h4>"))
+DT::datatable(read.csv(paste0("GSEA_U251_pfkfb3_kd_C6.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+              caption = "GSEA Results for U251_pfkfb3_kd (C6)")
+
+# List the GSEA plot images
+cat(paste0("<p style='font-size:18px; margin-top:20px; margin-bottom:20px;'>In the results of the GSEA analysis, the most significant pathways are shown.</p>"))
+
+files_pfkfb3 <- list.files("C:/Users/CHAMAAF/OneDrive/Documents/KAUST/GitHub/RNA-Seq_Eleonora/glycolysis_gene_kd", 
+                    pattern = "dotplot_GSEA_U251_pfkfb3_kd_.*.png", full.names = TRUE)
+
+# Create a dropdown menu to select condition
+dropdown_html <- "<select id='condition-select' onchange='showGSEAPlot(this.value)'>"
+dropdown_html <- paste0(dropdown_html, "<option value=''>Select a Category</option>")
+for (file in files_pfkfb3) {
+  condition_name <- gsub("dotplot_GSEA_|\\.png", "", basename(file))  # Extract category name from file name
+  dropdown_html <- paste0(dropdown_html, "<option value='", file, "'>", condition_name, "</option>")
+}
+dropdown_html <- paste0(dropdown_html, "</select>")
+
+# Default display the first GSEA plot
+first_image <- files_pfkfb3[1]  # Select the first image by default
+image_html <- paste0("<div id='gsea-container'><img src='", first_image, "' id='gsea-img' width='600'></div>")
+
+# JavaScript to update the image based on selection
+js_script <- "
+<script>
+function showGSEAPlot(imagePath) {
+  var img = document.getElementById('gsea-img');
+  if (imagePath) {
+    img.src = imagePath;
+    img.style.display = 'block';
+  } else {
+    img.style.display = 'none';
+  }
+}
+</script>
+"
+
+# Combine the HTML for dropdown, image container, and JavaScript
+html_output <- paste0(dropdown_html, image_html, js_script)
+
+# Output the HTML to show in the report
+cat(html_output)
+```
+
+## Gene Set Enrichment Analysis for U251_pfk1m_kd
+
+```{r GSEA_PFK1m, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='asis', fig.width=6, fig.height=5}
+# Repeat for other conditions and categories
+cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GSEA Results for U251_pfk1m_kd_C2</h4>"))
+DT::datatable(read.csv(paste0("GSEA_U251_pfk1m_kd_C2.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+              caption = "GSEA Results for U251_pfk1m_kd (C2)")
+
+cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GSEA Results for U251_pfk1m_kd_H</h4>"))
+DT::datatable(read.csv(paste0("GSEA_U251_pfk1m_kd_H.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+              caption = "GSEA Results for U251_pfk1m_kd (H)")
+
+cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GSEA Results for U251_pfk1m_kd_C6</h4>"))
+DT::datatable(read.csv(paste0("GSEA_U251_pfk1m_kd_C6.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+              caption = "GSEA Results for U251_pfk1m_kd (C6)")
+
+
+files_pfk1m <- list.files("C:/Users/CHAMAAF/OneDrive/Documents/KAUST/GitHub/RNA-Seq_Eleonora/glycolysis_gene_kd", 
+                    pattern = "dotplot_GSEA_U251_pfk1m_kd_.*.png", full.names = TRUE)
+
+# Create a dropdown menu to select condition
+dropdown_html <- "<select id='condition-select' onchange='showGSEAPlot(this.value)'>"
+dropdown_html <- paste0(dropdown_html, "<option value=''>Select a Category</option>")
+for (file in files_pfk1m) {
+  condition_name <- gsub("dotplot_GSEA_|\\.png", "", basename(file))  # Extract category name from file name
+  dropdown_html <- paste0(dropdown_html, "<option value='", file, "'>", condition_name, "</option>")
+}
+dropdown_html <- paste0(dropdown_html, "</select>")
+
+# Default display the first GSEA plot
+first_image <- files_pfk1m[1]  # Select the first image by default
+image_html <- paste0("<div id='gsea-container'><img src='", first_image, "' id='gsea-img' width='600'></div>")
+
+# JavaScript to update the image based on selection
+js_script <- "
+<script>
+function showGSEAPlot(imagePath) {
+  var img = document.getElementById('gsea-img');
+  if (imagePath) {
+    img.src = imagePath;
+    img.style.display = 'block';
+  } else {
+    img.style.display = 'none';
+  }
+}
+</script>
+"
+
+# Combine the HTML for dropdown, image container, and JavaScript
+html_output <- paste0(dropdown_html, image_html, js_script)
+
+# Output the HTML to show in the report
+cat(html_output)
+```
+
+## Gene Set Enrichment Analysis for U251_pfk1l_kd
+
+```{r GSEA_PFK1l, echo=FALSE, include=TRUE, message=FALSE, warning=FALSE, results='asis', fig.width=6, fig.height=5}
+
+cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GSEA Results for U251_pfk1l_kd_C2</h4>"))
+DT::datatable(read.csv(paste0("GSEA_U251_pfk1l_kd_C2.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+              caption = "GSEA Results for U251_pfk1l_kd (C2)")
+
+cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GSEA Results for U251_pfk1l_kd_H</h4>"))
+DT::datatable(read.csv(paste0("GSEA_U251_pfk1l_kd_H.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+              caption = "GSEA Results for U251_pfk1l_kd (H)")
+
+cat(paste0("<h4 style='margin-top:30px; margin-bottom:30px; color: blue;'>GSEA Results for U251_pfk1l_kd_C6</h4>"))
+DT::datatable(read.csv(paste0("GSEA_U251_pfk1l_kd_C6.csv")), options = list(pageLength = 10, scrollX = TRUE), 
+              caption = "GSEA Results for U251_pfk1l_kd (C6)")
+
+
+files_pfk1l <- list.files("C:/Users/CHAMAAF/OneDrive/Documents/KAUST/GitHub/RNA-Seq_Eleonora/glycolysis_gene_kd", 
+                    pattern = "dotplot_GSEA_U251_pfk1l_kd_.*.png", full.names = TRUE)
+
+# Create a dropdown menu to select condition
+dropdown_html <- "<select id='condition-select' onchange='showGSEAPlot(this.value)'>"
+dropdown_html <- paste0(dropdown_html, "<option value=''>Select a Category</option>")
+for (file in files_pfk1l) {
+  condition_name <- gsub("dotplot_GSEA_|\\.png", "", basename(file))  # Extract category name from file name
+  dropdown_html <- paste0(dropdown_html, "<option value='", file, "'>", condition_name, "</option>")
+}
+dropdown_html <- paste0(dropdown_html, "</select>")
+
+# Default display the first GSEA plot
+first_image <- files_pfk1l[1]  # Select the first image by default
+image_html <- paste0("<div id='gsea-container'><img src='", first_image, "' id='gsea-img' width='600'></div>")
+
+# JavaScript to update the image based on selection
+js_script <- "
+<script>
+function showGSEAPlot(imagePath) {
+  var img = document.getElementById('gsea-img');
+  if (imagePath) {
+    img.src = imagePath;
+    img.style.display = 'block';
+  } else {
+    img.style.display = 'none';
+  }
+}
+</script>
+"
+
+# Combine the HTML for dropdown, image container, and JavaScript
+html_output <- paste0(dropdown_html, image_html, js_script)
+
+# Output the HTML to show in the report
+cat(html_output)
+
+
+```
+
+## Complex Heatmap
+
+```{r, eval=FALSE}
+# Load necessary packages
+library(ComplexHeatmap)
+library(circlize)  # For color palettes
+library(dplyr)
+
+top_annotation <- HeatmapAnnotation(
+  condition = U251_coldata$conditions ,  # Use your column for conditions (e.g., U251_scr, U251_pfkfb3_kd)
+  col = list(condition = c("U251_scr" = "orange", "U251_pfkfb3_kd" = "purple", "U251_pfk1m_kd" = "green", "U251_pfk1l_kd" = "blue"))
+)
+
+# Scaling each row (gene) to mean=0 and sd=1
+expr_data_scaled <- t(scale(t(expr_data)))
+
+# Create the complex heatmap (too big)
+#heatmap_plot <- Heatmap(expr_data_scaled, 
+                        #name = "Gene Expression", 
+                        #top_annotation = top_annotation, 
+                        #cluster_rows = TRUE, 
+                        #cluster_columns = TRUE, 
+                        #show_row_names = TRUE, 
+                        #show_column_names = TRUE,
+                        #show_heatmap_legend = TRUE,
+                        #row_names_gp = gpar(fontsize = 8),  # Adjust font size for row names (gene names)
+                        #column_names_gp = gpar(fontsize = 8),  # Adjust font size for column names (sample names)
+                        #heatmap_legend_param = list(title = "Expression", labels_gp = gpar(fontsize = 10)), 
+                        #color = colorRampPalette(c("blue", "white", "red"))(100)  # Color gradient from blue (low) to red (high)
+#)
+
+print(heatmap_plot)
+
+
+## Plotting a heatmap for a specific set of genes
+
+gene_set_ids <- c("SARRIO_EPITHELIAL_MESENCHYMAL_TRANSITION_UP", "SARRIO_EPITHELIAL_MESENCHYMAL_TRANSITION_DN")
+
+# Extract the list of gene sets from the GSEA result
+gene_sets <- gsea_result_pfkfb3@result
+
+# Filter the result for the specific gene set
+target_gene_set <- "SARRIO_EPITHELIAL_MESENCHYMAL_TRANSITION_UP"
+
+# Extract the genes in that specific gene set from the core_enrichment column
+genes_in_target_set <- unlist(strsplit(gsea_result_pfkfb3@result[gsea_result_pfkfb3@result$Description == "SARRIO_EPITHELIAL_MESENCHYMAL_TRANSITION_UP", "core_enrichment"], "/"))
+
+# Check the result
+head(genes_in_target_set)
+
+
+# Convert gene symbols to Ensembl IDs
+genes_ensembl <- mapIds(org.Hs.eg.db, 
+                        keys = genes_in_target_set, 
+                        column = "ENSEMBL", 
+                        keytype = "SYMBOL", 
+                        multiVals = "first")
+
+# Step 2: Subset the expression data based on the Ensembl IDs
+# Filter expression data to include only the genes in the target set
+genes_in_target_set_ensembl <- genes_ensembl[!is.na(genes_ensembl)]  # Remove any NA values
+
+# Ensure the Ensembl IDs exist in your expression data
+genes_in_target_set_ensembl <- genes_in_target_set_ensembl[genes_in_target_set_ensembl %in% rownames(expr_data)]
+
+
+# Subset the expression data
+subset_exp_data <- expr_data[genes_in_target_set_ensembl, ]
+
+# Scaling each row (gene) to mean=0 and sd=1
+subset_exp_data_scaled <- t(scale(t(subset_exp_data)))
+
+# Step 3: Plot the heatmap using ComplexHeatmap
+library(ComplexHeatmap)
+Heatmap(subset_exp_data_scaled, 
+        name = "Gene Expression",
+        top_annotation = top_annotation,
+        show_row_names = TRUE, 
+        show_column_names = TRUE,
+        cluster_rows = TRUE, 
+        cluster_columns = TRUE)  # Scale the rows (genes) for better visualization
+
+```
+## HeatMap for Most Varying Genes in enriched pathways of pfk1l
+```{r Gene List Analysis, eval=FALSE}
+
+####KEGG Pathway####
+### Cell Cycle Pathway
+gene_entrez <- kegg_results_pfk1l@geneSets[["hsa04110"]]
+
+# Map Entrez IDs to gene symbols
+gene_info <- bitr(gene_entrez,
+                     fromType = "ENTREZID",
+                     toType = c("ENSEMBL", "SYMBOL"),
+                     OrgDb = org.Hs.eg.db)
+
+selected_samples <- colnames(vsd)[colData(vsd)$conditions %in% c("U251_pfk1l_kd", "U251_scr")]
+
+expr_data <- assay(vsd)
+
+
+# Subset DE genes from the pathway
+
+de_pfk1l <- res_pfk1l %>%
+  filter(padj < 0.05) %>%
+  filter(gene_id %in% gene_info$ENSEMBL) %>%
+  pull(gene_id)
+
+# Subset expression matrix
+expr_data_sig_filtered <- expr_data[de_pfk1l, selected_samples]
+
+# Calculate variance for each gene (row)
+gene_vars <- apply(expr_data_sig_filtered, 1, var)
+
+# Select top 30 most variable genes
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+
+# Final Expression Matrix
+expr_data_filtered <- expr_data_sig_filtered[top_genes, ]
+
+# Replace rownames with gene symbols
+ens2sym <- gene_info$SYMBOL
+names(ens2sym) <- gene_info$ENSEMBL
+rownames(expr_data_filtered) <- ens2sym[rownames(expr_data_filtered)]
+
+
+# Plot heatmap
+heat <- grid.grabExpr(pheatmap(expr_data_filtered,
+         scale = "row",
+         show_rownames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         main = "Top DE & Variable Cell Cycle Genes"))
+
+ggsave("Cell_Cycle_Pathway_PfK1L_heatmap.png", heat, width = 8, height = 10, dpi = 300)
+
+### Hippo Pathway
+gene_entrez <- kegg_results_pfk1l@geneSets[["hsa04390"]]
+
+# Map Entrez IDs to gene symbols
+gene_info <- bitr(gene_entrez,
+                     fromType = "ENTREZID",
+                     toType = c("ENSEMBL", "SYMBOL"),
+                     OrgDb = org.Hs.eg.db)
+
+selected_samples <- colnames(vsd)[colData(vsd)$conditions %in% c("U251_pfk1l_kd", "U251_scr")]
+
+expr_data <- assay(vsd)
+
+
+# Subset DE genes from the pathway
+
+de_pfk1l <- res_pfk1l %>%
+  filter(padj < 0.05) %>%
+  filter(gene_id %in% gene_info$ENSEMBL) %>%
+  pull(gene_id)
+
+# Subset expression matrix
+expr_data_sig_filtered <- expr_data[de_pfk1l, selected_samples]
+
+# Calculate variance for each gene (row)
+gene_vars <- apply(expr_data_sig_filtered, 1, var)
+
+# Select top 30 most variable genes
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+
+# Final Expression Matrix
+expr_data_filtered <- expr_data_sig_filtered[top_genes, ]
+
+# Replace rownames with gene symbols
+ens2sym <- gene_info$SYMBOL
+names(ens2sym) <- gene_info$ENSEMBL
+rownames(expr_data_filtered) <- ens2sym[rownames(expr_data_filtered)]
+
+
+# Plot heatmap
+
+heat <- grid.grabExpr(pheatmap(expr_data_filtered,
+         scale = "row",
+         show_rownames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         main = "Top DE & Variable Hippo Pathway Genes"))
+
+ggsave("Hippo_Pathway_PfK1L_heatmap.png", heat, width = 8, height = 10, dpi = 300)
+
+
+
+### Focal Adhesion Pathway
+gene_entrez <- kegg_results_pfk1l@geneSets[["hsa04510"]]
+
+# Map Entrez IDs to gene symbols
+gene_info <- bitr(gene_entrez,
+                     fromType = "ENTREZID",
+                     toType = c("ENSEMBL", "SYMBOL"),
+                     OrgDb = org.Hs.eg.db)
+
+selected_samples <- colnames(vsd)[colData(vsd)$conditions %in% c("U251_pfk1l_kd", "U251_scr")]
+
+expr_data <- assay(vsd)
+
+
+# Subset DE genes from the pathway
+
+de_pfk1l <- res_pfk1l %>%
+  filter(padj < 0.05) %>%
+  filter(gene_id %in% gene_info$ENSEMBL) %>%
+  pull(gene_id)
+
+# Subset expression matrix
+expr_data_sig_filtered <- expr_data[de_pfk1l, selected_samples]
+
+# Calculate variance for each gene (row)
+gene_vars <- apply(expr_data_sig_filtered, 1, var)
+
+# Select top 30 most variable genes
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+
+# Final Expression Matrix
+expr_data_filtered <- expr_data_sig_filtered[top_genes, ]
+
+# Replace rownames with gene symbols
+ens2sym <- gene_info$SYMBOL
+names(ens2sym) <- gene_info$ENSEMBL
+rownames(expr_data_filtered) <- ens2sym[rownames(expr_data_filtered)]
+
+
+# Plot heatmap
+
+heat <- grid.grabExpr(pheatmap(expr_data_filtered,
+         scale = "row",
+         show_rownames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         main = "Top DE & Variable Focal Adhesion Pathway Genes"))
+
+ggsave("Focal_Adhesion_Pathway_PfK1L_heatmap.png", heat, width = 8, height = 10, dpi = 300)
+
+          ### GO_Terms ####
+
+### Cell Migration
+gene_entrez <- simplified_go_term_pfk1m_bp@geneSets[["GO:0030335"]]
+
+# Map Entrez IDs to gene symbols
+gene_info <- bitr(gene_entrez,
+                     fromType = "ENSEMBL",
+                     toType = "SYMBOL",
+                     OrgDb = org.Hs.eg.db)
+
+selected_samples <- colnames(vsd)[colData(vsd)$conditions %in% c("U251_pfk1l_kd", "U251_scr")]
+
+expr_data <- assay(vsd)
+
+
+# Subset DE genes from the pathway
+
+de_pfk1l <- res_pfk1l %>%
+  filter(padj < 0.05) %>%
+  filter(gene_id %in% gene_info$ENSEMBL) %>%
+  pull(gene_id)
+
+# Subset expression matrix
+expr_data_sig_filtered <- expr_data[de_pfk1l, selected_samples]
+
+# Calculate variance for each gene (row)
+gene_vars <- apply(expr_data_sig_filtered, 1, var)
+
+# Select top 30 most variable genes
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+
+# Final Expression Matrix
+expr_data_filtered <- expr_data_sig_filtered[top_genes, ]
+
+# Replace rownames with gene symbols
+ens2sym <- gene_info$SYMBOL
+names(ens2sym) <- gene_info$ENSEMBL
+rownames(expr_data_filtered) <- ens2sym[rownames(expr_data_filtered)]
+
+
+# Plot heatmap
+
+heat <- grid.grabExpr(pheatmap(expr_data_filtered,
+         scale = "row",
+         show_rownames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         main = "Top DE & Variable Cell Migration Genes"))
+
+ggsave("Cell_Migration_PfK1L_heatmap.png", heat, width = 8, height = 10, dpi = 300)
+
+### Response to wound
+gene_entrez <- simplified_go_term_pfk1m_bp@geneSets[["GO:0009611"]]
+
+# Map Entrez IDs to gene symbols
+gene_info <- bitr(gene_entrez,
+                     fromType = "ENSEMBL",
+                     toType = "SYMBOL",
+                     OrgDb = org.Hs.eg.db)
+
+selected_samples <- colnames(vsd)[colData(vsd)$conditions %in% c("U251_pfk1l_kd", "U251_scr")]
+
+expr_data <- assay(vsd)
+
+
+# Subset DE genes from the pathway
+
+de_pfk1l <- res_pfk1l %>%
+  filter(padj < 0.05) %>%
+  filter(gene_id %in% gene_info$ENSEMBL) %>%
+  pull(gene_id)
+
+# Subset expression matrix
+expr_data_sig_filtered <- expr_data[de_pfk1l, selected_samples]
+
+# Calculate variance for each gene (row)
+gene_vars <- apply(expr_data_sig_filtered, 1, var)
+
+# Select top 30 most variable genes
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+
+# Final Expression Matrix
+expr_data_filtered <- expr_data_sig_filtered[top_genes, ]
+
+# Replace rownames with gene symbols
+ens2sym <- gene_info$SYMBOL
+names(ens2sym) <- gene_info$ENSEMBL
+rownames(expr_data_filtered) <- ens2sym[rownames(expr_data_filtered)]
+
+
+# Plot heatmap
+
+heat <- grid.grabExpr(pheatmap(expr_data_filtered,
+         scale = "row",
+         show_rownames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         main = "Top DE & Variable Wound Genes"))
+
+ggsave("Wound_PfK1L_heatmap.png", heat, width = 8, height = 10, dpi = 300)
+
+
+
+# check for common genes in the pathway(no need)
+
+common_de_genes <- Reduce(intersect, list(de_pfkfb3, de_pfk1m, de_pfk1l))
+common_de_genes <- intersect(common_de_genes, rownames(expr_data))
+expr_subset_common <- expr_data[common_de_genes, ]
+rownames(expr_subset_common) <- ens2sym[rownames(expr_subset_common)]
+
+pheatmap(expr_subset_common,
+         scale = "row",
+         show_rownames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         main = "Top DE & Variable Cell Cycle Genes")
+
+
+```
+## HeatMap for most Varying Genes in KEGG enriched pathway across all conditions
+
+```{r}
+kegg_pathway <- enrichKEGG(gene = NULL, organism = "hsa")
+
+# OR: use KEGGREST (preferred for full list extraction)
+library(KEGGREST)
+library(ggpubr)
+
+# Get all genes in hsa04110 (Cell Cycle)
+cell_cycle_kegg <- keggGet("hsa04110")[[1]]
+
+gene_entries <- cell_cycle_kegg$GENE
+
+# Map Entrez IDs to gene symbols
+gene_info <- bitr(gene_entries,
+                     fromType = "ENTREZID",
+                     toType = c("ENSEMBL", "SYMBOL"),
+                     OrgDb = org.Hs.eg.db)
+
+expr_data <- assay(vsd)
+
+expr_cell_cycle <- expr_data[intersect(rownames(expr_data), gene_info$ENSEMBL), ]
+
+
+# Calculate variance for each gene (row)
+gene_vars <- apply(expr_cell_cycle, 1, var)
+
+# Select top 30 most variable genes
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+
+# Final Expression Matrix
+expr_data_top <- expr_cell_cycle[top_genes, ]
+
+# Replace rownames with gene symbols
+ens2sym <- gene_info$SYMBOL
+names(ens2sym) <- gene_info$ENSEMBL
+rownames(expr_data_top) <- ens2sym[rownames(expr_data_top)]
+
+
+# Plot heatmap
+heat <- grid.grabExpr(pheatmap(expr_data_top,
+         scale = "row",
+         show_rownames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         main = "Top DE & Variable Cell Cycle Genes"))
+ggsave("gene heatmaps/Cell_Cycle_heatmap.png", heat, width = 8, height = 10, dpi = 300)
+
+
+
+# Get all genes in hsa04510 (Focal Adhesion)
+focal_adhesion_kegg <- keggGet("hsa04510")[[1]]
+
+gene_entries <- focal_adhesion_kegg$GENE
+
+# Map Entrez IDs to gene symbols
+gene_info <- bitr(gene_entries,
+                     fromType = "ENTREZID",
+                     toType = c("ENSEMBL", "SYMBOL"),
+                     OrgDb = org.Hs.eg.db)
+
+expr_data <- assay(vsd)
+
+expr_focal_adhesion <- expr_data[intersect(rownames(expr_data), gene_info$ENSEMBL), ]
+
+
+# Calculate variance for each gene (row)
+gene_vars <- apply(expr_focal_adhesion, 1, var)
+
+# Select top 30 most variable genes
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+
+# Final Expression Matrix
+expr_data_top <- expr_focal_adhesion[top_genes, ]
+
+# Replace rownames with gene symbols
+ens2sym <- gene_info$SYMBOL
+names(ens2sym) <- gene_info$ENSEMBL
+rownames(expr_data_top) <- ens2sym[rownames(expr_data_top)]
+
+
+# Plot heatmap
+heat <- grid.grabExpr(pheatmap(expr_data_top,
+         scale = "row",
+         show_rownames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         main = "Top DE & Variable Focal Adhesion Genes"))
+ggsave("Focal_Adhesion_heatmap.png", heat, width = 8, height = 10, dpi = 300)
+
+
+# Get all genes in hsa04390 (Hippo Pathway)
+hippo_kegg <- keggGet("hsa04390")[[1]]
+
+gene_entries <- hippo_kegg$GENE
+
+# Map Entrez IDs to gene symbols
+gene_info <- bitr(gene_entries,
+                     fromType = "ENTREZID",
+                     toType = c("ENSEMBL", "SYMBOL"),
+                     OrgDb = org.Hs.eg.db)
+
+expr_data <- assay(vsd)
+
+expr_hippo <- expr_data[intersect(rownames(expr_data), gene_info$ENSEMBL), ]
+
+
+# Calculate variance for each gene (row)
+gene_vars <- apply(expr_hippo, 1, var)
+
+# Select top 30 most variable genes
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+
+# Final Expression Matrix
+expr_data_top <- expr_hippo[top_genes, ]
+
+# Replace rownames with gene symbols
+ens2sym <- gene_info$SYMBOL
+names(ens2sym) <- gene_info$ENSEMBL
+rownames(expr_data_top) <- ens2sym[rownames(expr_data_top)]
+
+
+# Plot heatmap
+heat <- grid.grabExpr(pheatmap(expr_data_top,
+         scale = "row",
+         show_rownames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         main = "Top DE & Variable Hippo Pathway Genes"))
+ggsave("Hippo_Pathway_heatmap.png", heat, width = 8, height = 10, dpi = 300)
+
+# Get all genes in hsa04071 (Sphingolipid Signaling Pathway)
+sphingo_kegg <- keggGet("hsa04071")[[1]]
+
+gene_entries <- sphingo_kegg$GENE
+
+# Map Entrez IDs to gene symbols
+gene_info <- bitr(gene_entries,
+                     fromType = "ENTREZID",
+                     toType = c("ENSEMBL", "SYMBOL"),
+                     OrgDb = org.Hs.eg.db)
+
+expr_data <- assay(vsd)
+
+expr_sphingo <- expr_data[intersect(rownames(expr_data), gene_info$ENSEMBL), ]
+
+
+# Calculate variance for each gene (row)
+gene_vars <- apply(expr_sphingo, 1, var)
+
+# Select top 30 most variable genes
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+
+# Final Expression Matrix
+expr_data_top <- expr_sphingo[top_genes, ]
+
+# Replace rownames with gene symbols
+ens2sym <- gene_info$SYMBOL
+names(ens2sym) <- gene_info$ENSEMBL
+rownames(expr_data_top) <- ens2sym[rownames(expr_data_top)]
+
+
+# Plot heatmap
+heat <- grid.grabExpr(pheatmap(expr_data_top,
+         scale = "row",
+         show_rownames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         main = "Top DE & Variable Sphingolipid Signaling Pathway Genes"))
+ggsave("Sphingolipid_Signaling_Pathway_heatmap.png", heat, width = 8, height = 10, dpi = 300)
+
+# Get all genes in hsa05231 (Choline Metabolism in Cancer)
+Choline_kegg <- keggGet("hsa05231")[[1]]
+
+gene_entries <- Choline_kegg$GENE
+
+# Map Entrez IDs to gene symbols
+gene_info <- bitr(gene_entries,
+                     fromType = "ENTREZID",
+                     toType = c("ENSEMBL", "SYMBOL"),
+                     OrgDb = org.Hs.eg.db)
+
+expr_data <- assay(vsd)
+
+expr_Choline <- expr_data[intersect(rownames(expr_data), gene_info$ENSEMBL), ]
+
+
+# Calculate variance for each gene (row)
+gene_vars <- apply(expr_Choline, 1, var)
+
+# Select top 30 most variable genes
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+
+# Final Expression Matrix
+expr_data_top <- expr_Choline[top_genes, ]
+
+# Replace rownames with gene symbols
+ens2sym <- gene_info$SYMBOL
+names(ens2sym) <- gene_info$ENSEMBL
+rownames(expr_data_top) <- ens2sym[rownames(expr_data_top)]
+
+
+# Plot heatmap
+heat <- grid.grabExpr(pheatmap(expr_data_top,
+         scale = "row",
+         show_rownames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         main = "Top DE & Variable Choline Metabolism in Cancer Genes"))
+ggsave("Choline_Metabolism_in_Cancer_heatmap.png", heat, width = 8, height = 10, dpi = 300)
+
+# Get all genes in hsa04070 (Phosphatidylinositol Signaling System)
+Phospha_kegg <- keggGet("hsa04070")[[1]]
+
+gene_entries <- Phospha_kegg$GENE
+
+# Map Entrez IDs to gene symbols
+gene_info <- bitr(gene_entries,
+                     fromType = "ENTREZID",
+                     toType = c("ENSEMBL", "SYMBOL"),
+                     OrgDb = org.Hs.eg.db)
+
+expr_data <- assay(vsd)
+
+expr_Phospha <- expr_data[intersect(rownames(expr_data), gene_info$ENSEMBL), ]
+
+
+# Calculate variance for each gene (row)
+gene_vars <- apply(expr_Phospha, 1, var)
+
+# Select top 30 most variable genes
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+
+# Final Expression Matrix
+expr_data_top <- expr_Phospha[top_genes, ]
+
+# Replace rownames with gene symbols
+ens2sym <- gene_info$SYMBOL
+names(ens2sym) <- gene_info$ENSEMBL
+rownames(expr_data_top) <- ens2sym[rownames(expr_data_top)]
+
+
+# Plot heatmap
+heat <- grid.grabExpr(pheatmap(expr_data_top,
+         scale = "row",
+         show_rownames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         main = "Top DE & Variable Phosphatidylinositol Signaling System Genes"))
+ggsave("Phosphatidylinositol_Signaling_System_heatmap.png", heat, width = 8, height = 10, dpi = 300)
+
+# Get all genes in hsa00480 (Glutathione Metabolism)
+Gluta_kegg <- keggGet("hsa00480")[[1]]
+
+gene_entries <- Gluta_kegg$GENE
+
+# Map Entrez IDs to gene symbols
+gene_info <- bitr(gene_entries,
+                     fromType = "ENTREZID",
+                     toType = c("ENSEMBL", "SYMBOL"),
+                     OrgDb = org.Hs.eg.db)
+
+expr_data <- assay(vsd)
+
+expr_Gluta <- expr_data[intersect(rownames(expr_data), gene_info$ENSEMBL), ]
+
+
+# Calculate variance for each gene (row)
+gene_vars <- apply(expr_Gluta, 1, var)
+
+# Select top 30 most variable genes
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+
+# Final Expression Matrix
+expr_data_top <- expr_Gluta[top_genes, ]
+
+# Replace rownames with gene symbols
+ens2sym <- gene_info$SYMBOL
+names(ens2sym) <- gene_info$ENSEMBL
+rownames(expr_data_top) <- ens2sym[rownames(expr_data_top)]
+
+
+# Plot heatmap
+heat <- grid.grabExpr(pheatmap(expr_data_top,
+         scale = "row",
+         show_rownames = TRUE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         main = "Top DE & Variable Glutathione Metabolism Genes"))
+ggsave("Glutathione_Metabolism_heatmap.png", heat, width = 8, height = 10, dpi = 300)
+
+```
+
+# Genes expressed in all conditions and properly filtered for new Heatmaps
+A heatmap showing how cell cycle DEGs behave across all samples.
+Filters were applied to select only those genes passing all thresholds in any condition.
+
+```{r}
+# Gene Heatmap of cell cycle genes expressed in each condition and based on vsd 
+
+
+# Define thresholds
+lfcThreshold <- log2(2)
+padjThreshold <- 0.05
+meanThreshold <- 50
+conditions <- c("U251_pfkfb3_kd", "U251_pfk1m_kd", "U251_pfk1l_kd")
+ctrl <- "U251_scr"
+
+# Load VSD matrix
+expr_data <- assay(vsd)
+
+# KEGG Cell Cycle Genes (Entrez)
+cell_cycle_kegg <- keggGet("hsa04110")[[1]]
+gene_entries <- cell_cycle_kegg$GENE[seq(1, length(cell_cycle_kegg$GENE), by = 2)]  # extract Entrez IDs
+
+# Map Entrez to ENSEMBL and SYMBOL
+gene_info <- bitr(gene_entries,
+                  fromType = "ENTREZID",
+                  toType = c("ENSEMBL", "SYMBOL"),
+                  OrgDb = org.Hs.eg.db)
+
+cell_cycle_ensembl <- gene_info$ENSEMBL
+
+# Collect all DE cell cycle genes
+significant_cc_genes <- c()
+
+for (test in conditions) {
+  res_df <- results(dds, contrast = c("conditions", test, ctrl)) |>
+    as.data.frame() |>
+    rownames_to_column("gene_id") |>
+    filter(
+      padj < padjThreshold,
+      abs(log2FoldChange) > lfcThreshold,
+      baseMean > meanThreshold,
+      gene_id %in% cell_cycle_ensembl
+    )
+  
+  significant_cc_genes <- union(significant_cc_genes, res_df$gene_id)
+}
+
+# Final expression matrix
+expr_cell_cycle_filtered <- expr_data[intersect(significant_cc_genes, rownames(expr_data)), ]
+
+# Map rownames to SYMBOL
+rownames(expr_cell_cycle_filtered) <- gene_info$SYMBOL[match(rownames(expr_cell_cycle_filtered), gene_info$ENSEMBL)]
+
+# Plot
+
+annotation_col <- data.frame(Condition = colData(vsd)$conditions)
+rownames(annotation_col) <- colnames(vsd)
+
+heat <- pheatmap(expr_cell_cycle_filtered,
+         scale = "row",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         annotation_col = annotation_col,
+         main = "Cell Cycle Genes Expression Grouped by Condition")
+
+ggsave("gene heatmaps/Cell_Cycle_heatmap.png", heat, width = 8, height = 6, dpi = 300)
+
+# Get all genes in hsa04510 (Focal Adhesion)
+focal_adhesion_kegg <- keggGet("hsa04510")[[1]]
+
+
+# KEGG Focal Adhesion Genes (Entrez)
+gene_entries <- focal_adhesion_kegg$GENE[seq(1, length(focal_adhesion_kegg$GENE), by = 2)]  # extract Entrez IDs
+
+# Map Entrez to ENSEMBL and SYMBOL
+gene_info <- bitr(gene_entries,
+                  fromType = "ENTREZID",
+                  toType = c("ENSEMBL", "SYMBOL"),
+                  OrgDb = org.Hs.eg.db)
+
+focal_adhesion_ensembl <- gene_info$ENSEMBL
+
+# Collect all DE cell cycle genes
+significant_cc_genes <- c()
+
+for (test in conditions) {
+  res_df <- results(dds, contrast = c("conditions", test, ctrl)) |>
+    as.data.frame() |>
+    rownames_to_column("gene_id") |>
+    filter(
+      padj < padjThreshold,
+      abs(log2FoldChange) > lfcThreshold,
+      baseMean > meanThreshold,
+      gene_id %in% focal_adhesion_ensembl
+    )
+  
+  significant_cc_genes <- union(significant_cc_genes, res_df$gene_id)
+}
+
+# Final expression matrix
+expr_focal_adhesion_filtered <- expr_data[intersect(significant_cc_genes, rownames(expr_data)), ]
+
+# Map rownames to SYMBOL
+rownames(expr_focal_adhesion_filtered) <- gene_info$SYMBOL[match(rownames(expr_focal_adhesion_filtered), gene_info$ENSEMBL)]
+
+# Plot
+
+annotation_col <- data.frame(Condition = colData(vsd)$conditions)
+rownames(annotation_col) <- colnames(vsd)
+
+heat <- pheatmap(expr_focal_adhesion_filtered,
+         scale = "row",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         annotation_col = annotation_col,
+         main = "Focal Adhesion Genes Expression Grouped by Condition")
+
+ggsave("gene heatmaps/Focal_Adhesion_heatmap.png", heat, width = 10, height = 8, dpi = 300)
+
+
+# Get all genes in hsa04390 (Hippo Pathway)
+hippo_kegg <- keggGet("hsa04390")[[1]]
+
+# KEGG Focal Adhesion Genes (Entrez)
+gene_entries <- hippo_kegg$GENE[seq(1, length(hippo_kegg$GENE), by = 2)]  # extract Entrez IDs
+
+# Map Entrez to ENSEMBL and SYMBOL
+gene_info <- bitr(gene_entries,
+                  fromType = "ENTREZID",
+                  toType = c("ENSEMBL", "SYMBOL"),
+                  OrgDb = org.Hs.eg.db)
+
+hippo_ensembl <- gene_info$ENSEMBL
+
+# Collect all DE cell cycle genes
+significant_cc_genes <- c()
+
+for (test in conditions) {
+  res_df <- results(dds, contrast = c("conditions", test, ctrl)) |>
+    as.data.frame() |>
+    rownames_to_column("gene_id") |>
+    filter(
+      padj < padjThreshold,
+      abs(log2FoldChange) > lfcThreshold,
+      baseMean > meanThreshold,
+      gene_id %in% hippo_ensembl
+    )
+  
+  significant_cc_genes <- union(significant_cc_genes, res_df$gene_id)
+}
+
+# Final expression matrix
+expr_hippo_filtered <- expr_data[intersect(significant_cc_genes, rownames(expr_data)), ]
+
+# Map rownames to SYMBOL
+rownames(expr_hippo_filtered) <- gene_info$SYMBOL[match(rownames(expr_hippo_filtered), gene_info$ENSEMBL)]
+
+# Plot
+
+annotation_col <- data.frame(Condition = colData(vsd)$conditions)
+rownames(annotation_col) <- colnames(vsd)
+
+heat <- pheatmap(expr_hippo_filtered,
+         scale = "row",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         annotation_col = annotation_col,
+         main = "Hippo Genes Expression Grouped by Condition")
+
+ggsave("gene heatmaps/hippo_heatmap.png", heat, width = 10, height = 8, dpi = 300)
+
+
+# Get all genes in hsa04071 (Sphingolipid Signaling Pathway)
+sphingo_kegg <- keggGet("hsa04071")[[1]]
+# KEGG Focal Adhesion Genes (Entrez)
+gene_entries <- sphingo_kegg$GENE[seq(1, length(sphingo_kegg$GENE), by = 2)]  # extract Entrez IDs
+
+# Map Entrez to ENSEMBL and SYMBOL
+gene_info <- bitr(gene_entries,
+                  fromType = "ENTREZID",
+                  toType = c("ENSEMBL", "SYMBOL"),
+                  OrgDb = org.Hs.eg.db)
+
+sphingo_ensembl <- gene_info$ENSEMBL
+
+# Collect all DE cell cycle genes
+significant_cc_genes <- c()
+
+for (test in conditions) {
+  res_df <- results(dds, contrast = c("conditions", test, ctrl)) |>
+    as.data.frame() |>
+    rownames_to_column("gene_id") |>
+    filter(
+      padj < padjThreshold,
+      abs(log2FoldChange) > lfcThreshold,
+      baseMean > meanThreshold,
+      gene_id %in% sphingo_ensembl
+    )
+  
+  significant_cc_genes <- union(significant_cc_genes, res_df$gene_id)
+}
+
+# Final expression matrix
+expr_sphingo_filtered <- expr_data[intersect(significant_cc_genes, rownames(expr_data)), ]
+
+# Map rownames to SYMBOL
+rownames(expr_sphingo_filtered) <- gene_info$SYMBOL[match(rownames(expr_sphingo_filtered), gene_info$ENSEMBL)]
+
+# Plot
+
+annotation_col <- data.frame(Condition = colData(vsd)$conditions)
+rownames(annotation_col) <- colnames(vsd)
+
+heat <- pheatmap(expr_sphingo_filtered,
+         scale = "row",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         annotation_col = annotation_col,
+         main = "sphingo Genes Expression Grouped by Condition")
+
+ggsave("gene heatmaps/sphingo_heatmap.png", heat, width = 8, height = 6, dpi = 300)
+
+
+# Get all genes in hsa05231 (Choline Metabolism in Cancer)
+Choline_kegg <- keggGet("hsa05231")[[1]]
+# KEGG Focal Adhesion Genes (Entrez)
+gene_entries <- Choline_kegg$GENE[seq(1, length(Choline_kegg$GENE), by = 2)]  # extract Entrez IDs
+
+# Map Entrez to ENSEMBL and SYMBOL
+gene_info <- bitr(gene_entries,
+                  fromType = "ENTREZID",
+                  toType = c("ENSEMBL", "SYMBOL"),
+                  OrgDb = org.Hs.eg.db)
+
+Choline_ensembl <- gene_info$ENSEMBL
+
+# Collect all DE cell cycle genes
+significant_cc_genes <- c()
+
+for (test in conditions) {
+  res_df <- results(dds, contrast = c("conditions", test, ctrl)) |>
+    as.data.frame() |>
+    rownames_to_column("gene_id") |>
+    filter(
+      padj < padjThreshold,
+      abs(log2FoldChange) > lfcThreshold,
+      baseMean > meanThreshold,
+      gene_id %in% Choline_ensembl
+    )
+  
+  significant_cc_genes <- union(significant_cc_genes, res_df$gene_id)
+}
+
+# Final expression matrix
+expr_Choline_filtered <- expr_data[intersect(significant_cc_genes, rownames(expr_data)), ]
+
+# Map rownames to SYMBOL
+rownames(expr_Choline_filtered) <- gene_info$SYMBOL[match(rownames(expr_Choline_filtered), gene_info$ENSEMBL)]
+
+# Plot
+
+annotation_col <- data.frame(Condition = colData(vsd)$conditions)
+rownames(annotation_col) <- colnames(vsd)
+
+heat <- pheatmap(expr_Choline_filtered,
+         scale = "row",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         annotation_col = annotation_col,
+         main = "Choline Genes Expression Grouped by Condition")
+
+ggsave("gene heatmaps/Choline_heatmap.png", heat, width = 8, height = 6, dpi = 300)
+
+# Get all genes in hsa04070 (Phosphatidylinositol Signaling System)
+Phospha_kegg <- keggGet("hsa04070")[[1]]
+# KEGG Focal Adhesion Genes (Entrez)
+gene_entries <- Phospha_kegg$GENE[seq(1, length(Phospha_kegg$GENE), by = 2)]  # extract Entrez IDs
+
+# Map Entrez to ENSEMBL and SYMBOL
+gene_info <- bitr(gene_entries,
+                  fromType = "ENTREZID",
+                  toType = c("ENSEMBL", "SYMBOL"),
+                  OrgDb = org.Hs.eg.db)
+
+Phospha_ensembl <- gene_info$ENSEMBL
+
+# Collect all DE cell cycle genes
+significant_cc_genes <- c()
+
+for (test in conditions) {
+  res_df <- results(dds, contrast = c("conditions", test, ctrl)) |>
+    as.data.frame() |>
+    rownames_to_column("gene_id") |>
+    filter(
+      padj < padjThreshold,
+      abs(log2FoldChange) > lfcThreshold,
+      baseMean > meanThreshold,
+      gene_id %in% Phospha_ensembl
+    )
+  
+  significant_cc_genes <- union(significant_cc_genes, res_df$gene_id)
+}
+
+# Final expression matrix
+expr_Phospha_filtered <- expr_data[intersect(significant_cc_genes, rownames(expr_data)), ]
+
+# Map rownames to SYMBOL
+rownames(expr_Phospha_filtered) <- gene_info$SYMBOL[match(rownames(expr_Phospha_filtered), gene_info$ENSEMBL)]
+
+# Plot
+
+annotation_col <- data.frame(Condition = colData(vsd)$conditions)
+rownames(annotation_col) <- colnames(vsd)
+
+heat <- pheatmap(expr_Phospha_filtered,
+         scale = "row",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         annotation_col = annotation_col,
+         main = "Phospha Genes Expression Grouped by Condition")
+
+ggsave("gene heatmaps/Phospha_heatmap.png", heat, width = 8, height = 6, dpi = 300)
+
+# Get all genes in hsa00480 (Glutathione Metabolism)
+Gluta_kegg <- keggGet("hsa00480")[[1]]
+# KEGG Focal Adhesion Genes (Entrez)
+gene_entries <- Gluta_kegg$GENE[seq(1, length(Gluta_kegg$GENE), by = 2)]  # extract Entrez IDs
+
+# Map Entrez to ENSEMBL and SYMBOL
+gene_info <- bitr(gene_entries,
+                  fromType = "ENTREZID",
+                  toType = c("ENSEMBL", "SYMBOL"),
+                  OrgDb = org.Hs.eg.db)
+
+Gluta_ensembl <- gene_info$ENSEMBL
+
+# Collect all DE cell cycle genes
+significant_cc_genes <- c()
+
+for (test in conditions) {
+  res_df <- results(dds, contrast = c("conditions", test, ctrl)) |>
+    as.data.frame() |>
+    rownames_to_column("gene_id") |>
+    filter(
+      padj < padjThreshold,
+      abs(log2FoldChange) > lfcThreshold,
+      baseMean > meanThreshold,
+      gene_id %in% Gluta_ensembl
+    )
+  
+  significant_cc_genes <- union(significant_cc_genes, res_df$gene_id)
+}
+
+# Final expression matrix
+expr_Gluta_filtered <- expr_data[intersect(significant_cc_genes, rownames(expr_data)), ]
+
+# Map rownames to SYMBOL
+rownames(expr_Gluta_filtered) <- gene_info$SYMBOL[match(rownames(expr_Gluta_filtered), gene_info$ENSEMBL)]
+
+# Plot
+
+annotation_col <- data.frame(Condition = colData(vsd)$conditions)
+rownames(annotation_col) <- colnames(vsd)
+
+heat <- pheatmap(expr_Gluta_filtered,
+         scale = "row",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         annotation_col = annotation_col,
+         main = "Gluta Genes Expression Grouped by Condition")
+
+ggsave("gene heatmaps/Gluta_heatmap.png", heat, width = 8, height = 6, dpi = 300)
+
+
+# KEGG PI3K_AKT Genes (Entrez)
+PI3K_AKT_kegg <- keggGet("hsa04151")[[1]]
+gene_entries <- PI3K_AKT_kegg$GENE[seq(1, length(PI3K_AKT_kegg$GENE), by = 2)]  # extract Entrez IDs
+
+# Map Entrez to ENSEMBL and SYMBOL
+gene_info <- bitr(gene_entries,
+                  fromType = "ENTREZID",
+                  toType = c("ENSEMBL", "SYMBOL"),
+                  OrgDb = org.Hs.eg.db)
+
+PI3K_AKT_ensembl <- gene_info$ENSEMBL
+
+# Collect all DE cell cycle genes
+significant_cc_genes <- c()
+
+for (test in conditions) {
+  res_df <- results(dds, contrast = c("conditions", test, ctrl)) |>
+    as.data.frame() |>
+    rownames_to_column("gene_id") |>
+    filter(
+      padj < padjThreshold,
+      abs(log2FoldChange) > lfcThreshold,
+      baseMean > meanThreshold,
+      gene_id %in% PI3K_AKT_ensembl
+    )
+  
+  significant_cc_genes <- union(significant_cc_genes, res_df$gene_id)
+}
+
+# Final expression matrix
+expr_PI3K_AKT_filtered <- expr_data[intersect(significant_cc_genes, rownames(expr_data)), ]
+
+gene_vars <- apply(expr_PI3K_AKT_filtered, 1, var)
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+expr_PI3K_AKT_filtered <- expr_PI3K_AKT_filtered[top_genes, ]
+
+# Map rownames to SYMBOL
+rownames(expr_PI3K_AKT_filtered) <- gene_info$SYMBOL[match(rownames(expr_PI3K_AKT_filtered), gene_info$ENSEMBL)]
+
+# Plot
+
+annotation_col <- data.frame(Condition = colData(vsd)$conditions)
+rownames(annotation_col) <- colnames(vsd)
+
+heat <- pheatmap(expr_PI3K_AKT_filtered,
+         scale = "row",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         annotation_col = annotation_col,
+         main = "PI3K/AKT Genes Expression Grouped by Condition")
+
+ggsave("gene heatmaps/PI3K_AKT_heatmap.png", heat, width = 8, height = 6, dpi = 300)
+
+
+
+# KEGG MAPK Genes (Entrez)
+MAPK_kegg <- keggGet("hsa04010")[[1]]
+gene_entries <- MAPK_kegg$GENE[seq(1, length(MAPK_kegg$GENE), by = 2)]  # extract Entrez IDs
+
+# Map Entrez to ENSEMBL and SYMBOL
+gene_info <- bitr(gene_entries,
+                  fromType = "ENTREZID",
+                  toType = c("ENSEMBL", "SYMBOL"),
+                  OrgDb = org.Hs.eg.db)
+
+MAPK_ensembl <- gene_info$ENSEMBL
+
+# Collect all DE cell cycle genes
+significant_cc_genes <- c()
+
+for (test in conditions) {
+  res_df <- results(dds, contrast = c("conditions", test, ctrl)) |>
+    as.data.frame() |>
+    rownames_to_column("gene_id") |>
+    filter(
+      padj < padjThreshold,
+      abs(log2FoldChange) > lfcThreshold,
+      baseMean > meanThreshold,
+      gene_id %in% MAPK_ensembl
+    )
+  
+  significant_cc_genes <- union(significant_cc_genes, res_df$gene_id)
+}
+
+# Final expression matrix
+expr_MAPK_filtered <- expr_data[intersect(significant_cc_genes, rownames(expr_data)), ]
+
+gene_vars <- apply(expr_MAPK_filtered, 1, var)
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+expr_MAPK_filtered <- expr_MAPK_filtered[top_genes, ]
+
+# Map rownames to SYMBOL
+rownames(expr_MAPK_filtered) <- gene_info$SYMBOL[match(rownames(expr_MAPK_filtered), gene_info$ENSEMBL)]
+
+# Plot
+
+annotation_col <- data.frame(Condition = colData(vsd)$conditions)
+rownames(annotation_col) <- colnames(vsd)
+
+heat <- pheatmap(expr_MAPK_filtered,
+         scale = "row",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         annotation_col = annotation_col,
+         main = "MAPK Genes Expression Grouped by Condition")
+
+ggsave("gene heatmaps/MAPK_heatmap.png", heat, width = 8, height = 6, dpi = 300)
+
+
+
+# KEGG WNT Genes (Entrez)
+WNT_kegg <- keggGet("hsa04310")[[1]]
+gene_entries <- WNT_kegg$GENE[seq(1, length(WNT_kegg$GENE), by = 2)]  # extract Entrez IDs
+
+# Map Entrez to ENSEMBL and SYMBOL
+gene_info <- bitr(gene_entries,
+                  fromType = "ENTREZID",
+                  toType = c("ENSEMBL", "SYMBOL"),
+                  OrgDb = org.Hs.eg.db)
+
+WNT_ensembl <- gene_info$ENSEMBL
+
+# Collect all DE cell cycle genes
+significant_cc_genes <- c()
+
+for (test in conditions) {
+  res_df <- results(dds, contrast = c("conditions", test, ctrl)) |>
+    as.data.frame() |>
+    rownames_to_column("gene_id") |>
+    filter(
+      padj < padjThreshold,
+      abs(log2FoldChange) > lfcThreshold,
+      baseMean > meanThreshold,
+      gene_id %in% WNT_ensembl
+    )
+  
+  significant_cc_genes <- union(significant_cc_genes, res_df$gene_id)
+}
+
+# Final expression matrix
+expr_WNT_filtered <- expr_data[intersect(significant_cc_genes, rownames(expr_data)), ]
+
+gene_vars <- apply(expr_WNT_filtered, 1, var)
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+expr_WNT_filtered <- expr_WNT_filtered[top_genes, ]
+
+# Map rownames to SYMBOL
+rownames(expr_WNT_filtered) <- gene_info$SYMBOL[match(rownames(expr_WNT_filtered), gene_info$ENSEMBL)]
+
+# Plot
+
+annotation_col <- data.frame(Condition = colData(vsd)$conditions)
+rownames(annotation_col) <- colnames(vsd)
+
+heat <- pheatmap(expr_WNT_filtered,
+         scale = "row",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         annotation_col = annotation_col,
+         main = "WNT Genes Expression Grouped by Condition")
+
+ggsave("gene heatmaps/WNT_heatmap.png", heat, width = 8, height = 6, dpi = 300)
+
+
+
+# KEGG ACE-RAGE Genes (Entrez)
+ACE_RAGE_kegg <- keggGet("hsa04933")[[1]]
+gene_entries <- ACE_RAGE_kegg$GENE[seq(1, length(ACE_RAGE_kegg$GENE), by = 2)]  # extract Entrez IDs
+
+# Map Entrez to ENSEMBL and SYMBOL
+gene_info <- bitr(gene_entries,
+                  fromType = "ENTREZID",
+                  toType = c("ENSEMBL", "SYMBOL"),
+                  OrgDb = org.Hs.eg.db)
+
+ACE_RAGE_ensembl <- gene_info$ENSEMBL
+
+# Collect all DE cell cycle genes
+significant_cc_genes <- c()
+
+for (test in conditions) {
+  res_df <- results(dds, contrast = c("conditions", test, ctrl)) |>
+    as.data.frame() |>
+    rownames_to_column("gene_id") |>
+    filter(
+      padj < padjThreshold,
+      abs(log2FoldChange) > lfcThreshold,
+      baseMean > meanThreshold,
+      gene_id %in% ACE_RAGE_ensembl
+    )
+  
+  significant_cc_genes <- union(significant_cc_genes, res_df$gene_id)
+}
+
+# Final expression matrix
+expr_ACE_RAGE_filtered <- expr_data[intersect(significant_cc_genes, rownames(expr_data)), ]
+
+gene_vars <- apply(expr_ACE_RAGE_filtered, 1, var)
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:29]
+expr_ACE_RAGE_filtered <- expr_ACE_RAGE_filtered[top_genes, ]
+
+# Map rownames to SYMBOL
+rownames(expr_ACE_RAGE_filtered) <- gene_info$SYMBOL[match(rownames(expr_ACE_RAGE_filtered), gene_info$ENSEMBL)]
+
+# Plot
+
+annotation_col <- data.frame(Condition = colData(vsd)$conditions)
+rownames(annotation_col) <- colnames(vsd)
+
+heat <- pheatmap(expr_ACE_RAGE_filtered,
+         scale = "row",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         annotation_col = annotation_col,
+         main = "ACE/RAGE Genes Expression Grouped by Condition")
+
+ggsave("gene heatmaps/ACE_RAGE_heatmap.png", heat, width = 8, height = 6, dpi = 300)
+
+
+```
+
+## HeatMap for most Varying Genes in GO Terms enriched pathways across all conditions (GO Terms)
+
+```{r}
+go_id <- "GO:0030335"  # cell migration
+
+# Get all Entrez IDs annotated to this GO term
+go_entrez <- AnnotationDbi::select(org.Hs.eg.db,
+                                   keys = go_id,
+                                   keytype = "GO",
+                                   columns = c("ENTREZID")) %>%
+  dplyr::pull(ENTREZID) %>%
+  unique()
+
+gene_info <- bitr(go_entrez,
+                  fromType = "ENTREZID",
+                  toType = c("ENSEMBL", "SYMBOL"),
+                  OrgDb = org.Hs.eg.db)
+
+
+expr_data <- assay(vsd)
+
+expr_go <- expr_data[intersect(rownames(expr_data), gene_info$ENSEMBL), ]
+
+gene_vars <- apply(expr_go, 1, var)
+
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:min(30, nrow(expr_go))]
+expr_data_top <- expr_go[top_genes, ]
+
+
+ens2sym <- gene_info$SYMBOL
+names(ens2sym) <- gene_info$ENSEMBL
+rownames(expr_data_top) <- ens2sym[rownames(expr_data_top)]
+
+heat <- grid.grabExpr(
+  pheatmap(expr_data_top,
+           scale = "row",
+           show_rownames = TRUE,
+           cluster_rows = TRUE,
+           cluster_cols = TRUE,
+           main = paste("Top Variable Genes in Cell Migration"))
+)
+
+ggsave(paste0("Cell_Migration_heatmap.png"), heat, width = 8, height = 10, dpi = 300)
+
+
+go_id <- "GO:0009611"  # wound
+
+# Get all Entrez IDs annotated to this GO term
+go_entrez <- AnnotationDbi::select(org.Hs.eg.db,
+                                   keys = go_id,
+                                   keytype = "GO",
+                                   columns = c("ENTREZID")) %>%
+  dplyr::pull(ENTREZID) %>%
+  unique()
+
+gene_info <- bitr(go_entrez,
+                  fromType = "ENTREZID",
+                  toType = c("ENSEMBL", "SYMBOL"),
+                  OrgDb = org.Hs.eg.db)
+
+
+expr_data <- assay(vsd)
+
+expr_go <- expr_data[intersect(rownames(expr_data), gene_info$ENSEMBL), ]
+
+gene_vars <- apply(expr_go, 1, var)
+
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:min(30, nrow(expr_go))]
+expr_data_top <- expr_go[top_genes, ]
+
+
+ens2sym <- gene_info$SYMBOL
+names(ens2sym) <- gene_info$ENSEMBL
+rownames(expr_data_top) <- ens2sym[rownames(expr_data_top)]
+
+heat <- grid.grabExpr(
+  pheatmap(expr_data_top,
+           scale = "row",
+           show_rownames = TRUE,
+           cluster_rows = TRUE,
+           cluster_cols = TRUE,
+           main = paste("Top Variable Genes in Wound Response"))
+)
+
+ggsave(paste0("Wound_Response_heatmap.png"), heat, width = 8, height = 10, dpi = 300)
+
+
+
+```
+
+## Genes in Heatmaps for GO Terms that are filtered with mean threshold, logfold, and padj
+
+```{r}
+
+# Define thresholds
+lfcThreshold <- log2(2)
+padjThreshold <- 0.05
+meanThreshold <- 50
+conditions <- c("U251_pfkfb3_kd", "U251_pfk1m_kd", "U251_pfk1l_kd")
+ctrl <- "U251_scr"
+
+# Load VSD matrix
+expr_data <- assay(vsd)
+
+# Get ENSEMBL IDs for GO:0030335 (cell migration)
+go_term_id <- "GO:0030335"
+go2gene <- AnnotationDbi::select(org.Hs.eg.db, 
+                                 keys = go_term_id,
+                                 columns = c("ENSEMBL", "SYMBOL"),
+                                 keytype = "GOALL")
+
+go_genes_ensembl <- unique(na.omit(go2gene$ENSEMBL))
+
+# Collect all DE cell migration genes
+significant_migration_genes <- c()
+
+for (test in conditions) {
+  res_df <- results(dds, contrast = c("conditions", test, ctrl)) |>
+    as.data.frame() |>
+    rownames_to_column("gene_id") |>
+    filter(
+      padj < padjThreshold,
+      abs(log2FoldChange) > lfcThreshold,
+      baseMean > meanThreshold,
+      gene_id %in% go_genes_ensembl
+    )
+  
+  significant_migration_genes <- union(significant_migration_genes, res_df$gene_id)
+  
+}
+
+# Final expression matrix
+expr_migration_filtered <- expr_data[intersect(significant_migration_genes, rownames(expr_data)), ]
+
+gene_vars <- apply(expr_migration_filtered, 1, var)
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+expr_migration_filtered <- expr_migration_filtered[top_genes, ]
+
+# Map rownames to SYMBOL
+ens2sym <- go2gene$SYMBOL
+names(ens2sym) <- go2gene$ENSEMBL
+rownames(expr_migration_filtered) <- ens2sym[rownames(expr_migration_filtered)]
+
+# Annotation for columns (samples)
+annotation_col <- data.frame(Condition = colData(vsd)$conditions)
+rownames(annotation_col) <- colnames(vsd)
+
+# Plot heatmap
+heat <- pheatmap(expr_migration_filtered,
+         scale = "row",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         annotation_col = annotation_col,
+         main = "Cell Migration Genes Expression")
+
+ggsave("gene heatmaps/Cell_Migration_GO_heatmap.png", heat, width = 8, height = 6, dpi = 300)
+
+
+# Get ENSEMBL IDs for GO:0009611 (Wound Response)
+go_term_id <- "GO:0009611"
+go2gene <- AnnotationDbi::select(org.Hs.eg.db, 
+                                 keys = go_term_id,
+                                 columns = c("ENSEMBL", "SYMBOL"),
+                                 keytype = "GOALL")
+
+go_genes_ensembl <- unique(na.omit(go2gene$ENSEMBL))
+
+# Collect all DE cell migration genes
+significant_migration_genes <- c()
+
+for (test in conditions) {
+  res_df <- results(dds, contrast = c("conditions", test, ctrl)) |>
+    as.data.frame() |>
+    rownames_to_column("gene_id") |>
+    filter(
+      padj < padjThreshold,
+      abs(log2FoldChange) > lfcThreshold,
+      baseMean > meanThreshold,
+      gene_id %in% go_genes_ensembl
+    )
+  
+  significant_migration_genes <- union(significant_migration_genes, res_df$gene_id)
+  
+}
+
+# Final expression matrix
+expr_migration_filtered <- expr_data[intersect(significant_migration_genes, rownames(expr_data)), ]
+
+gene_vars <- apply(expr_migration_filtered, 1, var)
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+expr_migration_filtered <- expr_migration_filtered[top_genes, ]
+
+# Map rownames to SYMBOL
+ens2sym <- go2gene$SYMBOL
+names(ens2sym) <- go2gene$ENSEMBL
+rownames(expr_migration_filtered) <- ens2sym[rownames(expr_migration_filtered)]
+
+# Annotation for columns (samples)
+annotation_col <- data.frame(Condition = colData(vsd)$conditions)
+rownames(annotation_col) <- colnames(vsd)
+
+# Plot heatmap
+heat <- pheatmap(expr_migration_filtered,
+         scale = "row",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         annotation_col = annotation_col,
+         main = "Wound Response Genes Expression")
+
+ggsave("gene heatmaps/Wound_Response_GO_heatmap.png", heat, width = 8, height = 6, dpi = 300)
+
+
+
+# Get ENSEMBL IDs for GO:0070371 (ERK1 ERK2 Cascade)
+go_term_id <- "GO:0070371" #ERK1 ERK2 Cascade
+go2gene <- AnnotationDbi::select(org.Hs.eg.db, 
+                                 keys = go_term_id,
+                                 columns = c("ENSEMBL", "SYMBOL"),
+                                 keytype = "GOALL")
+
+go_genes_ensembl <- unique(na.omit(go2gene$ENSEMBL))
+
+# Collect all DE cell migration genes
+significant_migration_genes <- c()
+
+for (test in conditions) {
+  res_df <- results(dds, contrast = c("conditions", test, ctrl)) |>
+    as.data.frame() |>
+    rownames_to_column("gene_id") |>
+    filter(
+      padj < padjThreshold,
+      abs(log2FoldChange) > lfcThreshold,
+      baseMean > meanThreshold,
+      gene_id %in% go_genes_ensembl
+    )
+  
+  significant_migration_genes <- union(significant_migration_genes, res_df$gene_id)
+  
+}
+
+# Final expression matrix
+expr_migration_filtered <- expr_data[intersect(significant_migration_genes, rownames(expr_data)), ]
+
+gene_vars <- apply(expr_migration_filtered, 1, var)
+top_genes <- names(sort(gene_vars, decreasing = TRUE))[1:30]
+expr_migration_filtered <- expr_migration_filtered[top_genes, ]
+
+# Map rownames to SYMBOL
+ens2sym <- go2gene$SYMBOL
+names(ens2sym) <- go2gene$ENSEMBL
+rownames(expr_migration_filtered) <- ens2sym[rownames(expr_migration_filtered)]
+
+# Annotation for columns (samples)
+annotation_col <- data.frame(Condition = colData(vsd)$conditions)
+rownames(annotation_col) <- colnames(vsd)
+
+# Plot heatmap
+heat <- pheatmap(expr_migration_filtered,
+         scale = "row",
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         annotation_col = annotation_col,
+         main = "ERK1 ERK2 Cascade Genes Expression")
+
+ggsave("gene heatmaps/ERK1_ERK2_Cascade_GO_heatmap.png", heat, width = 8, height = 6, dpi = 300)
+
+
+
+```
+
+## Pathway activity across conditions (KEGG)
+If GSVA scores are higher in PFK1L-KD than in SCR:
+→ Cell Cycle pathway is more active in PFK1L knockdown cells.
+
+If they are lower:
+→ Suppression of the pathway in that condition.
+
+
+
+```{r}
+BiocManager::install("GSVA")
+library(GSVA)
+library(GSEABase)
+library(clusterProfiler)
+library(KEGGREST)
+library(org.Hs.eg.db)
+library(ggpubr)
+library(dplyr)
+
+# Get full KEGG pathway gene sets
+get_entrez_genes <- function(pathway_id) {
+  kegg_data <- keggGet(pathway_id)[[1]]
+  genes <- sapply(strsplit(kegg_data$GENE, ";"), `[`, 1)
+  genes <- gsub(" .*", "", genes)
+  unique(genes)
+}
+
+# Pathway IDs
+pathways <- list(
+  Cell_Cycle = "hsa04110",
+  Focal_Adhesion = "hsa04510",
+  Hippo = "hsa04390",
+  Sphingolipid = "hsa04071",
+  Choline = "hsa05231",
+  Phosphatidylinositol = "hsa04070",
+  Glutathione = "hsa00480"
+)
+
+# Build gene sets for GSVA (convert Entrez to ENSEMBL)
+kegg_gene_sets <- list()
+
+for (pname in names(pathways)) {
+  entrez_ids <- get_entrez_genes(pathways[[pname]])
+  gene_info <- bitr(entrez_ids,
+                    fromType = "ENTREZID",
+                    toType = "ENSEMBL",
+                    OrgDb = org.Hs.eg.db)
+  kegg_gene_sets[[pname]] <- gene_info$ENSEMBL
+}
+
+# Prepare expression matrix
+expr_mat <- assay(vsd)
+
+# Run GSVA
+gsva_params <- gsvaParam(expr_mat, kegg_gene_sets)
+
+gsva_scores <- gsva(gsva_params)
+
+# Build comparison list manually
+comparisons <- list(
+  c("U251_scr", "U251_pfk1l_kd"),
+  c("U251_scr", "U251_pfk1m_kd"),
+  c("U251_scr", "U251_pfkfb3_kd")
+)
+# Loop through each pathway and plot
+for (pname in rownames(gsva_scores)) {
+
+# Plot for one pathway (e.g., Cell_Cycle)
+df <- data.frame(
+  GSVA_Score = gsva_scores[pname, ],
+  Condition = colData(vsd)$conditions
+)
+
+# Position stars above boxes (not floating high)
+label_y_df <- df %>%
+  filter(Condition != "U251_scr") %>%
+  group_by(Condition) %>%
+  summarise(y.max = max(GSVA_Score, na.rm = TRUE))
+
+y_range <- max(df$GSVA_Score, na.rm = TRUE) - min(df$GSVA_Score, na.rm = TRUE)
+offset <- y_range * 0.10
+label_y_df$label.y <- label_y_df$y.max + offset
+
+label_y_values <- label_y_df$label.y[match(
+  sapply(comparisons, function(x) x[2]),
+  label_y_df$Condition
+)]
+
+
+
+# Plot with stars
+p <- ggboxplot(df, x = "Condition", y = "GSVA_Score",
+          color = "Condition", add = "jitter") +
+  stat_compare_means(method = "anova", label.y = max(df$GSVA_Score, na.rm = TRUE) + offset) +
+  stat_compare_means(method = "t.test",
+                     ref.group = "U251_scr",
+                     label = "p.signif",
+                     label.y.npc = 1,  # place stars at the top of each box
+                     label.x.npc = "center",  # center align each star horizontally
+                     bracket.size = 0) +  # optional: remove brackets for clean look
+  ggtitle(paste("Pathway Activity:", pname))
+
+# Save plot
+ggsave(paste0("GSVA_", pname, "_boxplot.png"), plot = p,
+       width = 8, height = 6, dpi = 300)
+}
+
+```
+
+## Pathway activity across conditions (GO Terms)
+
+```{r}
+
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(ggpubr)
+library(dplyr)
+library(GSVA)
+
+go_id <- "GO:0030335"
+
+gene_info <- AnnotationDbi::select(org.Hs.eg.db,
+                                   keys = go_id,
+                                   keytype = "GO",
+                                   columns = c("ENSEMBL", "SYMBOL")) %>%
+  na.omit()
+
+go_gene_set <- unique(gene_info$ENSEMBL)
+
+
+# Prepare expression matrix
+expr_mat <- assay(vsd)
+
+# Run GSVA
+gsva_params_go <- gsvaParam(expr_mat, list(GO_Term = go_gene_set),)
+
+gsva_scores_go <- gsva(gsva_params_go)
+
+
+
+# Define reference comparisons
+comparisons <- list(
+  c("U251_scr", "U251_pfk1l_kd"),
+  c("U251_scr", "U251_pfk1m_kd"),
+  c("U251_scr", "U251_pfkfb3_kd")
+)
+  
+  df <- data.frame(
+    GSVA_Score = gsva_scores_go["GO_Term", ],
+    Condition = colData(vsd)$conditions
+  )
+  
+  # Compute max GSVA per group for proper label.y
+  label_y_df <- df %>%
+    filter(Condition != "U251_scr") %>%
+    group_by(Condition) %>%
+    summarise(y.max = max(GSVA_Score, na.rm = TRUE))
+  
+  y_range <- max(df$GSVA_Score, na.rm = TRUE) - min(df$GSVA_Score, na.rm = TRUE)
+  offset <- y_range * 0.10
+  label_y_df$label.y <- label_y_df$y.max + offset
+  
+  label_y_values <- label_y_df$label.y[match(
+    sapply(comparisons, function(x) x[2]),
+    label_y_df$Condition
+  )]
+  
+  # Plot
+  p <- ggboxplot(df, x = "Condition", y = "GSVA_Score",
+                 color = "Condition", add = "jitter") +
+    stat_compare_means(method = "anova",
+                       label.y = max(df$GSVA_Score, na.rm = TRUE) + offset) +
+    stat_compare_means(method = "t.test",
+                       ref.group = "U251_scr",
+                       label = "p.signif",
+                       label.y.npc = 1,  # place stars at the top of each box
+                       label.x.npc = "center",  # center align each star horizontally
+                       bracket.size = 0) +
+    ggtitle(paste("GO Pathway Activity: Positive Regulation of Cell Migration"))
+  
+  
+  # Save plot
+  ggsave(paste0("GO_Positive Regulation of Cell Migration_boxplot.png"),
+         plot = p, width = 8, height = 6, dpi = 300)
+
+  
+  go_id <- "GO:0009611"
+  
+  gene_info <- AnnotationDbi::select(org.Hs.eg.db,
+                                     keys = go_id,
+                                     keytype = "GO",
+                                     columns = c("ENSEMBL", "SYMBOL")) %>%
+    na.omit()
+  
+  go_gene_set <- unique(gene_info$ENSEMBL)
+  
+  
+  # Prepare expression matrix
+  expr_mat <- assay(vsd)
+  
+  # Run GSVA
+  gsva_params_go <- gsvaParam(expr_mat, list(GO_Term = go_gene_set),)
+  
+  gsva_scores_go <- gsva(gsva_params_go)
+  
+  
+  
+  # Define reference comparisons
+  comparisons <- list(
+    c("U251_scr", "U251_pfk1l_kd"),
+    c("U251_scr", "U251_pfk1m_kd"),
+    c("U251_scr", "U251_pfkfb3_kd")
+  )
+  
+  df <- data.frame(
+    GSVA_Score = gsva_scores_go["GO_Term", ],
+    Condition = colData(vsd)$conditions
+  )
+  
+  # Compute max GSVA per group for proper label.y
+  label_y_df <- df %>%
+    filter(Condition != "U251_scr") %>%
+    group_by(Condition) %>%
+    summarise(y.max = max(GSVA_Score, na.rm = TRUE))
+  
+  y_range <- max(df$GSVA_Score, na.rm = TRUE) - min(df$GSVA_Score, na.rm = TRUE)
+  offset <- y_range * 0.10
+  label_y_df$label.y <- label_y_df$y.max + offset
+  
+  label_y_values <- label_y_df$label.y[match(
+    sapply(comparisons, function(x) x[2]),
+    label_y_df$Condition
+  )]
+  
+  # Plot
+  p <- ggboxplot(df, x = "Condition", y = "GSVA_Score",
+                 color = "Condition", add = "jitter") +
+    stat_compare_means(method = "anova",
+                       label.y = max(df$GSVA_Score, na.rm = TRUE) + offset) +
+    stat_compare_means(method = "t.test",
+                       ref.group = "U251_scr",
+                       label = "p.signif",
+                       label.y.npc = 1,  # place stars at the top of each box
+                       label.x.npc = "center",  # center align each star horizontally
+                       bracket.size = 0) +
+    ggtitle(paste("GO Pathway Activity: Response to Wounding")) +
+    annotate("text", x = 4, y = 0.05, label = "test")
+  
+  
+  # Save plot
+  ggsave(paste0("GO_Response to Wounding_boxplot.png"),
+         plot = p, width = 8, height = 6, dpi = 300)
+  
+
+
+```
+## Cell Cycle related genes in the volcano plot
+
+```{r}
+# Add a "highlight" column for genes in cell cycle
+res_pfk1l$in_cell_cycle <- res_pfk1l$gene_id %in% gene_info$ENSEMBL
+
+
+# ggplot volcano
+library(ggplot2)
+ggplot(res_pfk1l, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(aes(color = in_cell_cycle)) +
+  theme_minimal()
+```
+## Upregulated and downregulated GO Terms
+```{r}
+up_genes_pfk1l <- res_pfk1l %>%
+  filter(padj < 0.05 & log2FoldChange > 1) %>%
+  pull(gene_id)
+
+down_genes_pfk1l <- res_pfk1l %>%
+  filter(padj < 0.05 & log2FoldChange < -1) %>%
+  pull(gene_id)
+
+up_entrez_pfk1l <- bitr(up_genes_pfk1l, fromType = "ENSEMBL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+down_entrez_pfk1l <- bitr(down_genes_pfk1l, fromType = "ENSEMBL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+ego_up_pfk1l <- enrichGO(gene = up_entrez_pfk1l$ENTREZID,
+                   OrgDb = org.Hs.eg.db,
+                   ont = "BP",
+                   pAdjustMethod = "BH",
+                   pvalueCutoff = 0.05,
+                   readable = TRUE)
+
+ego_down_pfk1l <- enrichGO(gene = down_entrez_pfk1l$ENTREZID,
+                     OrgDb = org.Hs.eg.db,
+                     ont = "BP",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff = 0.05,
+                     readable = TRUE)
+
+dotplot(ego_up_pfk1l, title = "Upregulated GO Terms pfk1l")
+
+dotplot(ego_down_pfk1l, title = "Downregulated GO Terms pfk1l")
+
+df_up_pfk1l <- as.data.frame(ego_up_pfk1l)
+df_down_pfk1l <- as.data.frame(ego_down_pfk1l)
+
+# Add direction labels
+df_up_pfk1l$Direction <- "Upregulated"
+df_down_pfk1l$Direction <- "Downregulated"
+
+combined_go_pfk1l <- rbind(df_up_pfk1l[1:10, ], df_down_pfk1l[1:10, ])
+
+combined_go_pfk1l$Description <- factor(combined_go_pfk1l$Description,
+                                   levels = rev(unique(combined_go_pfk1l$Description)))
+
+ggplot(combined_go_pfk1l, aes(x = Description, y = -log10(p.adjust), fill = Direction)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_fill_manual(values = c("Upregulated" = "#E64B35", "Downregulated" = "#3C5488")) +
+  labs(title = "GO Enrichment for Up- and Downregulated Genes PFK1L",
+       x = "GO Term", y = "-log10 Adjusted p-value") +
+  theme_minimal(base_size = 12)
+
+ggplot(combined_go_pfk1l, aes(x = -log10(p.adjust), y = Description, color = Direction, size = Count)) +
+  geom_point() +
+  scale_color_manual(values = c("Upregulated" = "#E64B35", "Downregulated" = "#3C5488")) +
+  labs(title = "GO Enrichment PFK1l(Up vs Downregulated Genes)",
+       x = "-log10 Adjusted p-value", y = "GO Term") +
+  theme_minimal()
+
+
+## PFK1m
+
+up_genes_pfk1m <- res_pfk1m %>%
+  filter(padj < 0.05 & log2FoldChange > 0.3) %>%
+  pull(gene_id)
+
+down_genes_pfk1m <- res_pfk1m %>%
+  filter(padj < 0.05 & log2FoldChange < -0.3) %>%
+  pull(gene_id)
+
+up_entrez_pfk1m <- bitr(up_genes_pfk1m, fromType = "ENSEMBL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+down_entrez_pfk1m <- bitr(down_genes_pfk1m, fromType = "ENSEMBL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+ego_up_pfk1m <- enrichGO(gene = up_entrez_pfk1m$ENTREZID,
+                   OrgDb = org.Hs.eg.db,
+                   ont = "BP",
+                   pAdjustMethod = "BH",
+                   pvalueCutoff = 0.05,
+                   readable = TRUE)
+
+ego_down_pfk1m <- enrichGO(gene = down_entrez_pfk1m$ENTREZID,
+                     OrgDb = org.Hs.eg.db,
+                     ont = "BP",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff = 0.05,
+                     readable = TRUE)
+
+dotplot(ego_up_pfk1m, title = "Upregulated GO Terms pfk1m")
+
+dotplot(ego_down_pfk1m, title = "Downregulated GO Terms pfk1m")
+
+df_up_pfk1m <- as.data.frame(ego_up_pfk1m)
+df_down_pfk1m <- as.data.frame(ego_down_pfk1m)
+
+# Add direction labels
+df_up_pfk1m$Direction <- "Upregulated"
+df_down_pfk1m$Direction <- "Downregulated"
+
+combined_go_pfk1m <- rbind(df_up_pfk1m[1:10, ], df_down_pfk1m[1:10, ])
+
+combined_go_pfk1m$Description <- factor(combined_go_pfk1m$Description,
+                                   levels = rev(unique(combined_go_pfk1m$Description)))
+
+ggplot(combined_go_pfk1m, aes(x = Description, y = -log10(p.adjust), fill = Direction)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_fill_manual(values = c("Upregulated" = "#E64B35", "Downregulated" = "#3C5488")) +
+  labs(title = "GO Enrichment for Up- and Downregulated Genes pfk1m",
+       x = "GO Term", y = "-log10 Adjusted p-value") +
+  theme_minimal(base_size = 12)
+
+ggplot(combined_go_pfk1m, aes(x = -log10(p.adjust), y = Description, color = Direction, size = Count)) +
+  geom_point() +
+  scale_color_manual(values = c("Upregulated" = "#E64B35", "Downregulated" = "#3C5488")) +
+  labs(title = "GO Enrichment pfk1m(Up vs Downregulated Genes)",
+       x = "-log10 Adjusted p-value", y = "GO Term") +
+  theme_minimal()
+
+
+## pfkfb3
+
+up_genes_pfkfb3 <- res_pfkfb3 %>%
+  filter(padj < 0.05 & log2FoldChange > 0.3) %>%
+  pull(gene_id)
+
+down_genes_pfkfb3 <- res_pfkfb3 %>%
+  filter(padj < 0.05 & log2FoldChange < -0.3) %>%
+  pull(gene_id)
+
+up_entrez_pfkfb3 <- bitr(up_genes_pfkfb3, fromType = "ENSEMBL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+down_entrez_pfkfb3 <- bitr(down_genes_pfkfb3, fromType = "ENSEMBL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+ego_up_pfkfb3 <- enrichGO(gene = up_entrez_pfkfb3$ENTREZID,
+                   OrgDb = org.Hs.eg.db,
+                   ont = "BP",
+                   pAdjustMethod = "BH",
+                   pvalueCutoff = 0.05,
+                   readable = TRUE)
+
+ego_down_pfkfb3 <- enrichGO(gene = down_entrez_pfkfb3$ENTREZID,
+                     OrgDb = org.Hs.eg.db,
+                     ont = "BP",
+                     pAdjustMethod = "BH",
+                     pvalueCutoff = 0.05,
+                     readable = TRUE)
+
+dotplot(ego_up_pfkfb3, title = "Upregulated GO Terms pfkfb3")
+
+dotplot(ego_down_pfkfb3, title = "Downregulated GO Terms pfkfb3")
+
+df_up_pfkfb3 <- as.data.frame(ego_up_pfkfb3)
+df_down_pfkfb3 <- as.data.frame(ego_down_pfkfb3)
+
+# Add direction labels
+df_up_pfkfb3$Direction <- "Upregulated"
+df_down_pfkfb3$Direction <- "Downregulated"
+
+combined_go_pfkfb3 <- rbind(df_up_pfkfb3[1:10, ], df_down_pfkfb3[1:10, ])
+
+combined_go_pfkfb3$Description <- factor(combined_go_pfkfb3$Description,
+                                   levels = rev(unique(combined_go_pfkfb3$Description)))
+
+ggplot(combined_go_pfkfb3, aes(x = Description, y = -log10(p.adjust), fill = Direction)) +
+  geom_col(position = "dodge") +
+  coord_flip() +
+  scale_fill_manual(values = c("Upregulated" = "#E64B35", "Downregulated" = "#3C5488")) +
+  labs(title = "GO Enrichment for Up- and Downregulated Genes pfkfb3",
+       x = "GO Term", y = "-log10 Adjusted p-value") +
+  theme_minimal(base_size = 12)
+
+ggplot(combined_go_pfkfb3, aes(x = -log10(p.adjust), y = Description, color = Direction, size = Count)) +
+  geom_point() +
+  scale_color_manual(values = c("Upregulated" = "#E64B35", "Downregulated" = "#3C5488")) +
+  labs(title = "GO Enrichment pfkfb3(Up vs Downregulated Genes)",
+       x = "-log10 Adjusted p-value", y = "GO Term") +
+  theme_minimal()
+
+
+```
